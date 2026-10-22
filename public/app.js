@@ -10,6 +10,8 @@ marked.setOptions({ breaks: true, gfm: true });
 const $ = (s) => document.querySelector(s);
 const ta = $("#editor-ta");
 const caretLayer = $("#caret-layer");
+// Erreurs JS visibles (utile pour diagnostiquer à distance)
+window.addEventListener("error", (ev) => { try { toast("Erreur : " + (ev.message || "inconnue"), true); } catch (_e) {} });
 const toast = (msg, err = false) => {
   const t = $("#toast");
   t.textContent = msg;
@@ -239,6 +241,24 @@ async function openFile(path) {
   ta.addEventListener("keyup", publishCursor);
   ta.addEventListener("click", publishCursor);
   renderRemote();
+
+  // Repli : si le temps réel (WebSocket) ne connecte pas — reverse proxy sans relais
+  // WS, NAT, pare-feu… — le document s'ouvre quand même via HTTP (l'éditeur et la
+  // publication restent utilisables ; la synchro live reprend si le WS s'établit).
+  setTimeout(async () => {
+    try {
+      if (!ydoc || currentPath !== path) return;
+      if (provider.wsconnected) return; // temps réel OK, rien à faire
+      const ytext = ydoc.getText("content");
+      if (ytext.length > 0) return;
+      const r = await fetch("/api/file?path=" + encodeURIComponent(path));
+      const d = await r.json();
+      if (d.exists && !provider.wsconnected && ydoc.getText("content").length === 0) {
+        ydoc.transact(() => ydoc.getText("content").insert(0, d.content));
+        $("#conn").textContent = "⚪ temps réel indisponible — doc ouvert via HTTP (éditable + publiable)";
+      }
+    } catch (_e) {}
+  }, 1200);
 }
 
 // ----- Wire-up -----
