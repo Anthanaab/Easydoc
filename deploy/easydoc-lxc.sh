@@ -246,13 +246,22 @@ if [ "$USAGE" = create ]; then
 fi
 
 # -- déploiement d'Easydoc -------------------------------------------------------------------------------
+# Le template LXC vierge n'a pas curl : on récupère provision.sh sur l'HÔTE
+# (curl présent, accès internet vérifié) et on l'injecte via stdin (bash -s).
 info "Déploiement d'Easydoc (quelques minutes)"
-run pct exec "$CTID" -- env DEBIAN_FRONTEND=noninteractive \
-  EASYDOC_TOKEN="$TOKEN" EASYDOC_REPO="$REPO" EASYDOC_BRANCH="$BRANCH" EASYDOC_PORT="$PORT" bash -c "
-    set -e
-    curl -fsSL 'https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/provision.sh' -o /tmp/easydoc-provision.sh \
-      || { echo 'Provisionnement introuvable sur GitHub' >&2; exit 1; }
-    bash /tmp/easydoc-provision.sh"
+command -v curl >/dev/null 2>&1 || die "curl introuvable sur l'hôte (requis pour récupérer provision.sh)."
+TMP_PROV="$(mktemp /tmp/easydoc-provision.XXXXXX.sh)"
+trap 'rm -f "$TMP_PROV"' EXIT
+if ! curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/provision.sh" -o "$TMP_PROV"; then
+  die "Impossible de télécharger deploy/provision.sh depuis GitHub (repo/branche : $REPO/$BRANCH)."
+fi
+if [ -n "$DRY" ]; then
+  echo "    [simulation] pct exec $CTID -- env EASYDOC_TOKEN='***' EASYDOC_REPO=$REPO EASYDOC_BRANCH=$BRANCH EASYDOC_PORT=$PORT bash -s < provision.sh" >&2
+else
+  pct exec "$CTID" -- env DEBIAN_FRONTEND=noninteractive \
+    EASYDOC_TOKEN="$TOKEN" EASYDOC_REPO="$REPO" EASYDOC_BRANCH="$BRANCH" EASYDOC_PORT="$PORT" \
+    bash -s < "$TMP_PROV"
+fi
 
 IP="$( [ -n "$DRY" ] && echo "IP" || pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}')"
 echo
