@@ -14,7 +14,7 @@ services:
       LOCAL_REPO_DIR: "/app/data/localrepo"
     volumes:
       # Données auto-hébergées (mode local / base de documents) persistées
-      - gamevault_data:/app/data
+      - easydoc_data:/app/data
 
 volumes:
-  gamevault_data:
+  easydoc_data:

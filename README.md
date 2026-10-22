@@ -75,7 +75,18 @@ auto-hébergé et testable immédiatement.
 docker compose up -d
 ```
 Variables passées dans `docker-compose.yml` (GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH).
-Les données auto-hébergées sont dans le volume `gamevault_data`.
+Les données auto-hébergées sont dans le volume `easydoc_data`.
+
+## 🐧 Déploiement LXC (Proxmox) — un seul script
+
+```
+curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/easydoc-lxc.sh -o easydoc-lxc.sh
+bash easydoc-lxc.sh        # → conteneur prêt, service auto, URL affichée (http://IP:3000)
+```
+
+Création complète du conteneur (menus), déploiement du code, configuration du jeton, service
+systemd et health check, avec mise à jour / suppression automatiques.
+Détails : [`deploy/README.md`](deploy/README.md).
 
 ## ⚙️ Configuration
 
