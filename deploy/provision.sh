@@ -18,6 +18,7 @@ PORT="${EASYDOC_PORT:-3000}"
 TOKEN="${EASYDOC_TOKEN:-}"
 APP_DIR=/opt/easydoc
 SERVICE=easydoc.service
+PROVISION_VERSION=3   # marqueur vérifié par easydoc-lxc.sh (le CDN peut servir une version périmée)
 
 # Mise à jour : préserve la configuration existante si aucune variable n'est fournie.
 if [ -f "$APP_DIR/.env" ]; then

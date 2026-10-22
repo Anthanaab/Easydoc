@@ -246,13 +246,31 @@ fi
 # -- déploiement d'Easydoc -------------------------------------------------------------------------------
 # Le template LXC vierge n'a pas curl : on récupère provision.sh sur l'HÔTE
 # (curl présent, accès internet vérifié) et on l'injecte via stdin (bash -s).
+# Le CDN de GitHub peut servir une version périmée : on télécharge d'abord par
+# SHA du dernier commit (immuable), avec repli sur la branche + marqueur de version.
 info "Déploiement d'Easydoc (quelques minutes)"
 command -v curl >/dev/null 2>&1 || die "curl introuvable sur l'hôte (requis pour récupérer provision.sh)."
 TMP_PROV="$(mktemp /tmp/easydoc-provision.XXXXXX.sh)"
 trap 'rm -f "$TMP_PROV"' EXIT
-if ! curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/provision.sh" -o "$TMP_PROV"; then
-  die "Impossible de télécharger deploy/provision.sh depuis GitHub (repo/branche : $REPO/$BRANCH)."
-fi
+
+fetch_prov() {  # $1 = ref (SHA ou branche) ; OK si téléchargé et marqueur présent
+  curl -fsSL -m 25 "https://raw.githubusercontent.com/$REPO/$1/deploy/provision.sh" -o "$TMP_PROV" 2>/dev/null \
+    && grep -q "PROVISION_VERSION=" "$TMP_PROV"
+}
+
+GOT_PROV=""
+for attempt in 1 2 3; do
+  SHA_BRANCH="$(curl -fsSL -m 15 "https://api.github.com/repos/$REPO/branches/$BRANCH" 2>/dev/null \
+    | tr -d '\n ' | grep -oE '"sha":"[a-f0-9]{40}"' | head -1 | cut -d'"' -f4 || true)"
+  if [ -n "$SHA_BRANCH" ] && fetch_prov "$SHA_BRANCH"; then GOT_PROV=1; break; fi
+  if fetch_prov "$BRANCH"; then GOT_PROV=1; break; fi
+  if [ "$attempt" -lt 3 ]; then
+    warn "version de provision.sh pas encore propagée — nouvel essai dans 5 s ($attempt/3)…"
+    sleep 5
+  fi
+done
+[ -n "$GOT_PROV" ] || die "Impossible d'obtenir deploy/provision.sh à jour (CDN en retard ? réessayez dans une minute)."
+
 if [ -n "$DRY" ]; then
   echo "    [simulation] pct exec $CTID -- env EASYDOC_TOKEN='***' EASYDOC_REPO=$REPO EASYDOC_BRANCH=$BRANCH EASYDOC_PORT=$PORT bash -s < provision.sh" >&2
 else
