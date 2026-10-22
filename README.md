@@ -18,7 +18,12 @@ en train d'être tapé.
   et fusionnées en direct, sans écraser la saisie en cours.
 - Aperçu Markdown (édition / côte à côte / aperçu), liens entre documents, thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
+- **Autres fichiers** : import par bouton ou glisser-déposer (25 Mo max par fichier). Les PDF et les
+  images s'affichent dans la page, les fichiers Word (.docx) en aperçu, les autres (Excel, PowerPoint…)
+  se téléchargent. Un Word ou un PDF peut être transformé en **version modifiable** (document
+  Markdown, modifiable à plusieurs) ; le fichier d'origine est conservé.
 - Dépôt GitHub **connecté depuis l'interface** (Réglages) : aucun jeton à l'installation.
+  **Déconnecter** efface le jeton du serveur et revient aux fichiers locaux (le dépôt GitHub n'est pas touché).
 - Fonctionne aussi sans GitHub (dépôt git local) et sans Internet sur le réseau local.
 
 ## Démarrage rapide
@@ -79,12 +84,14 @@ lire ou d'écrire en dehors du dépôt, ni les fichiers cachés comme `.git` ou 
 | `LOCAL_REPO_DIR` | `$DATA_DIR/localrepo` | Dépôt git local (mode sans GitHub) |
 | `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
 | `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
+| `MAX_UPLOAD_MB` | `25` | Taille maximale d'un fichier importé |
 | `GITHUB_TOKEN`, `GITHUB_REPO`, `GITHUB_BRANCH` | — | Préconfiguration, utilisée tant qu'aucun réglage n'a été enregistré depuis l'interface |
 
 ## Développement
 
 - `server.js` — serveur HTTP + WebSocket, enregistrement, fusion des modifications externes
 - `src/repo.js` — accès au dépôt (API GitHub ou git local) · `src/paths.js` — validation des chemins
+- `src/convert.js` — aperçu et conversion des fichiers Word et PDF
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
   DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.

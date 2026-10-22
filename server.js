@@ -12,6 +12,7 @@
  */
 "use strict";
 
+const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const express = require("express");
@@ -21,12 +22,15 @@ const { Octokit } = require("@octokit/rest");
 const yws = require("y-websocket/bin/utils");
 const { RepoService } = require("./src/repo");
 const { SettingsStore } = require("./src/settings");
-const { safeDocPath } = require("./src/paths");
+const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths");
+const convert = require("./src/convert");
 const pkg = require("./package.json");
 
-require("dotenv").config({ path: path.join(__dirname, ".env") });
+const ENV_FILE = process.env.ENV_FILE || path.join(__dirname, ".env");
+require("dotenv").config({ path: ENV_FILE });
 
 const PORT = Number(process.env.PORT || 3000);
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 25);
 const PUBLIC = path.join(__dirname, "public");
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const LOCAL_DIR = process.env.LOCAL_REPO_DIR || path.join(DATA_DIR, "localrepo");
@@ -205,6 +209,7 @@ yws.setPersistence({
 
 // ---- Modifications externes (agent IA, push git…) : fusion à 3 voies ---------------------------
 let lastHead = null;
+let lastLocalSig = null;
 async function pollExternal(force = false) {
   let headChanged = false;
   if (repo.mode === "github") {
@@ -213,6 +218,11 @@ async function pollExternal(force = false) {
     if (!force && head === lastHead) return { changed: 0 };
     headChanged = head !== lastHead;
     lastHead = head;
+  } else {
+    // dépôt local : fichiers ajoutés / supprimés sur le disque (par un agent, un partage réseau…)
+    const sig = (await repo.listFiles()).map((f) => `${f.path}:${f.size}`).sort().join("|");
+    if (lastLocalSig !== null && sig !== lastLocalSig) headChanged = true;
+    lastLocalSig = sig;
   }
   // mode local : lecture directe des fichiers ouverts (un agent peut les modifier sur le disque)
   let changed = 0;
@@ -274,7 +284,37 @@ async function resetDocs() {
   for (const s of states.values()) clearTimeout(s.timer);
   states.clear();
   lastHead = null;
+  lastLocalSig = null;
 }
+
+/** Retire le jeton et le dépôt GitHub éventuellement écrits dans le fichier .env. */
+function purgeEnvCredentials() {
+  try {
+    if (!fs.existsSync(ENV_FILE)) return;
+    const lines = fs.readFileSync(ENV_FILE, "utf8").split("\n");
+    const kept = lines.filter((l) => !/^\s*GITHUB_(TOKEN|REPO|BRANCH)\s*=/.test(l));
+    if (kept.length !== lines.length) fs.writeFileSync(ENV_FILE, kept.join("\n"));
+  } catch (e) {
+    console.error("[settings] nettoyage de .env impossible :", e.message);
+  }
+  delete process.env.GITHUB_TOKEN; delete process.env.GITHUB_REPO; delete process.env.GITHUB_BRANCH;
+}
+
+/** Nom libre : « rapport.pdf » → « rapport (2).pdf » s'il existe déjà (insensible à la casse). */
+async function uniquePath(p) {
+  const taken = new Set((await repo.listFiles()).map((f) => f.path.toLowerCase()));
+  if (!taken.has(p.toLowerCase())) return p;
+  const ext = path.posix.extname(p);
+  const stem = p.slice(0, p.length - ext.length);
+  for (let i = 2; i < 1000; i++) {
+    const c = `${stem} (${i})${ext}`;
+    if (!taken.has(c.toLowerCase())) return c;
+  }
+  throw new Error("Trop de fichiers portent ce nom.");
+}
+const joinPath = (...xs) => xs.filter(Boolean).join("/");
+const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const encSeg = (s) => encodeURIComponent(s).replace(/\(/g, "%28").replace(/\)/g, "%29");
 
 // ---- API HTTP ------------------------------------------------------------------------------------
 const app = express();
@@ -282,7 +322,13 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "5mb" }));
 app.use(express.static(PUBLIC, { maxAge: 0, etag: true }));
 
-const bad = (res, code, error) => res.status(code).json({ ok: false, error });
+const bad = (res, code, error) => {
+  // jeton GitHub expiré / révoqué : message actionnable plutôt qu'une erreur technique
+  if (/Bad credentials|Requires authentication/i.test(String(error))) {
+    return res.status(502).json({ ok: false, error: "GitHub refuse le jeton d'accès (expiré ou révoqué). Ouvre Réglages pour en saisir un nouveau ou déconnecter le dépôt." });
+  }
+  return res.status(code).json({ ok: false, error });
+};
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, mode: repo.mode, version: pkg.version }));
 
@@ -293,11 +339,106 @@ app.get("/api/config", (_req, res) => res.json({
   login: repo.mode === "github" ? settings.get().githubLogin || null : null,
   version: settings.get().version,
   appVersion: pkg.version,
+  maxUploadMB: MAX_UPLOAD_MB,
 }));
 
 app.get("/api/files", async (_req, res) => {
-  try { res.json({ ok: true, files: await repo.listFiles() }); }
+  try { res.json({ ok: true, files: (await repo.listFiles()).map((f) => ({ ...f, kind: kindOf(f.path) })) }); }
   catch (e) { bad(res, 500, e.message); }
+});
+
+// Contenu brut d'un fichier : PDF et images affichés dans la page, le reste en téléchargement.
+const INLINE_KINDS = new Set(["pdf", "image"]);
+app.get("/api/raw", async (req, res) => {
+  const p = safeFilePath(String(req.query.path || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  try {
+    let buf;
+    const live = isEditable(p) ? yws.docs.get(p) : null;
+    if (live && live.getMap("meta").get("loaded")) buf = Buffer.from(live.getText(TEXT).toString(), "utf8");
+    else {
+      const f = await repo.readRaw(p);
+      if (!f) return bad(res, 404, "Fichier introuvable.");
+      buf = f.buf;
+    }
+    const kind = kindOf(p);
+    const ext = path.posix.extname(p).toLowerCase();
+    if (kind === "markdown" || kind === "text") res.set("Content-Type", `${kind === "markdown" ? "text/markdown" : "text/plain"}; charset=utf-8`);
+    else res.type(ext || "bin");
+    const inline = req.query.download !== "1" && INLINE_KINDS.has(kind);
+    res.set("Content-Disposition", `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(path.posix.basename(p))}`);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.set("Cache-Control", "no-store");
+    // un SVG ou un fichier HTML ouvert directement ne doit jamais pouvoir exécuter de script
+    if (!inline || ext === ".svg") res.set("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+    res.send(buf);
+  } catch (e) { bad(res, 500, e.message); }
+});
+
+// Import d'un fichier (corps de la requête = contenu brut). Un nom déjà pris est complété : « x (2).pdf ».
+app.post("/api/upload", express.raw({ type: () => true, limit: MAX_UPLOAD_MB * 1024 * 1024 }), async (req, res) => {
+  const wanted = safeFilePath(String(req.query.path || ""));
+  if (!wanted) return bad(res, 400, "Nom de fichier non pris en charge.");
+  const author = String(req.query.author || "").slice(0, 40);
+  const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  try {
+    const target = req.query.replace === "1" ? wanted : await uniquePath(wanted);
+    const live = isEditable(target) ? yws.docs.get(target) : null;
+    if (live && live.getMap("meta").get("loaded")) {
+      live.transact(() => applyDiff(live.getText(TEXT), buf.toString("utf8")), "upload");
+      await commitDoc(target, author);
+    } else {
+      await serialize(target, () => repo.writeFile(target, buf, `Easydoc : import de ${target}${author ? ` (${author})` : ""}`));
+    }
+    bump("treeVersion");
+    res.json({ ok: true, path: target, renamed: target !== wanted });
+  } catch (e) { bad(res, 500, e.message); }
+});
+
+// Aperçu d'un fichier Word (.docx) en HTML (nettoyé ensuite par le navigateur).
+app.get("/api/preview", async (req, res) => {
+  const p = safeFilePath(String(req.query.path || ""));
+  if (!p || kindOf(p) !== "docx") return bad(res, 400, "Aperçu disponible uniquement pour les fichiers Word (.docx).");
+  try {
+    const f = await repo.readRaw(p);
+    if (!f) return bad(res, 404, "Fichier introuvable.");
+    res.json({ ok: true, html: await convert.docxToHtml(f.buf) });
+  } catch (e) { bad(res, 422, `Impossible de lire ce fichier Word : ${e.message}`); }
+});
+
+// Crée une version modifiable (Markdown) d'un fichier Word ou PDF. L'original n'est pas modifié.
+app.post("/api/convert", async (req, res) => {
+  const p = safeFilePath(String(req.body.path || ""));
+  const kind = p && kindOf(p);
+  if (!p || (kind !== "docx" && kind !== "pdf")) return bad(res, 400, "Conversion possible uniquement pour les fichiers Word (.docx) et PDF.");
+  const author = String(req.body.author || "").slice(0, 40);
+  try {
+    const f = await repo.readRaw(p);
+    if (!f) return bad(res, 404, "Fichier introuvable.");
+    const dir = dirOf(p);
+    const stem = path.posix.basename(p).replace(/\.[^.]+$/, "");
+    const target = await uniquePath(joinPath(dir, `${stem}.md`));
+    const targetStem = path.posix.basename(target).replace(/\.md$/i, "");
+    let markdown, images = 0;
+    if (kind === "docx") {
+      const imgDir = `${targetStem} - images`;
+      const pending = [];
+      const r = await convert.docxToMarkdown(f.buf, async (name, data) => {
+        pending.push({ p: joinPath(dir, imgDir, name), data });
+        return `${encSeg(imgDir)}/${encSeg(name)}`;
+      });
+      for (const im of pending) {
+        await serialize(im.p, () => repo.writeFile(im.p, im.data, `Easydoc : image extraite de ${p}`));
+      }
+      markdown = r.markdown;
+      images = r.images;
+    } else {
+      markdown = await convert.pdfToMarkdown(f.buf, stem);
+    }
+    await serialize(target, () => repo.writeFile(target, markdown, `Easydoc : version modifiable de ${p}${author ? ` (${author})` : ""}`));
+    bump("treeVersion");
+    res.json({ ok: true, path: target, images });
+  } catch (e) { bad(res, 422, e.message); }
 });
 
 app.get("/api/file", async (req, res) => {
@@ -343,23 +484,24 @@ app.post("/api/sync", async (_req, res) => {
 
 app.post("/api/create", async (req, res) => {
   let raw = String(req.body.path || "").trim();
-  if (raw && !/\.md$/i.test(raw)) raw += ".md";
+  if (raw && !/\.(md|markdown|txt)$/i.test(raw)) raw += ".md";
   const p = safeDocPath(raw);
   if (!p) return bad(res, 400, "Nom invalide : lettres, chiffres, espaces, - et _ ; dossiers séparés par /.");
   try {
-    if (await repo.readFile(p)) return bad(res, 409, "Un document porte déjà ce nom.");
-    const title = path.posix.basename(p).replace(/\.md$/i, "");
-    await serialize(p, () => repo.writeFile(p, `# ${title}\n\n`, `Easydoc : création de ${p}`));
+    if (await repo.readRaw(p)) return bad(res, 409, "Un document porte déjà ce nom.");
+    const title = path.posix.basename(p).replace(/\.[^.]+$/, "");
+    const initial = /\.txt$/i.test(p) ? "" : `# ${title}\n\n`;
+    await serialize(p, () => repo.writeFile(p, initial, `Easydoc : création de ${p}`));
     bump("treeVersion");
     res.json({ ok: true, path: p });
   } catch (e) { bad(res, 500, e.message); }
 });
 
 app.delete("/api/file", async (req, res) => {
-  const p = safeDocPath(String(req.query.path || ""));
+  const p = safeFilePath(String(req.query.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
   try {
-    const doc = yws.docs.get(p);
+    const doc = isEditable(p) ? yws.docs.get(p) : null;
     const s = st(p);
     clearTimeout(s.timer); s.dirty = false;
     const r = await serialize(p, () => repo.deleteFile(p, `Easydoc : suppression de ${p}`));
@@ -419,8 +561,11 @@ app.post("/api/settings/test", async (req, res) => {
 app.post("/api/settings", async (req, res) => {
   try {
     if (req.body.mode === "local") {
+      // déconnexion complète : jeton et dépôt effacés du serveur (config + .env).
+      // Le dépôt sur GitHub n'est ni modifié ni supprimé.
       await resetDocs();
       settings.save({ githubToken: "", githubRepo: "", githubBranch: "", githubLogin: "" });
+      purgeEnvCredentials();
       await repo.switch({ githubToken: "", githubRepo: "", githubBranch: "" });
       await repo.seedIfEmpty();
       bump("configVersion");
@@ -442,6 +587,14 @@ app.post("/api/settings", async (req, res) => {
     console.error("[settings]", e.message);
     bad(res, 400, e.message);
   }
+});
+
+// Erreurs (fichier trop gros, JSON invalide…) : toujours une réponse JSON lisible.
+app.use((err, _req, res, _next) => {
+  if (err && err.type === "entity.too.large") return bad(res, 413, `Fichier trop volumineux (maximum ${MAX_UPLOAD_MB} Mo).`);
+  if (err && err.type === "entity.parse.failed") return bad(res, 400, "Requête invalide.");
+  console.error("[http]", err && err.message);
+  bad(res, (err && err.status) || 500, "Erreur interne du serveur.");
 });
 
 // ---- Serveur HTTP + WebSocket --------------------------------------------------------------------

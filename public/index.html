@@ -35,7 +35,11 @@
           <input id="search" type="search" placeholder="Rechercher" autocomplete="off" />
           <kbd>Ctrl K</kbd>
         </label>
-        <button class="btn btn-primary btn-block" id="btnNew"><span data-icon="plus"></span>Nouveau document</button>
+        <div class="tool-row">
+          <button class="btn btn-primary" id="btnNew"><span data-icon="plus"></span>Nouveau document</button>
+          <button class="btn btn-icon" id="btnUpload" title="Importer des fichiers (PDF, Word, images…)"><span data-icon="upload"></span></button>
+        </div>
+        <input type="file" id="fileInput" multiple hidden />
       </div>
 
       <nav class="tree" id="tree" aria-label="Documents"></nav>
@@ -73,8 +77,11 @@
         <div class="empty" id="empty">
           <div class="empty-icon" data-icon="file"></div>
           <h2>Aucun document ouvert</h2>
-          <p>Choisis un document dans la liste ou crées-en un nouveau.</p>
-          <button class="btn btn-primary" id="btnNewEmpty"><span data-icon="plus"></span>Nouveau document</button>
+          <p>Choisis un document dans la liste, crées-en un nouveau ou glisse des fichiers ici.</p>
+          <div class="empty-actions">
+            <button class="btn btn-primary" id="btnNewEmpty"><span data-icon="plus"></span>Nouveau document</button>
+            <button class="btn" id="btnUploadEmpty"><span data-icon="upload"></span>Importer des fichiers</button>
+          </div>
         </div>
         <div class="pane pane-editor" id="paneEditor">
           <textarea id="editor" spellcheck="true" placeholder="Commence à écrire… (Markdown)" aria-label="Contenu du document"></textarea>
@@ -82,8 +89,13 @@
         <div class="pane pane-preview" id="panePreview">
           <article class="prose" id="preview"></article>
         </div>
+        <div class="pane pane-file" id="paneFile"></div>
       </section>
     </main>
+  </div>
+
+  <div class="dropzone" id="dropzone" aria-hidden="true">
+    <div class="dropzone-card"><span data-icon="upload"></span><div id="dropzoneText">Dépose tes fichiers pour les importer</div></div>
   </div>
 
   <div class="modal hidden" id="modal" role="dialog" aria-modal="true">

@@ -10,15 +10,34 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&":
 const LOCAL = { origin: "local-editor" }; // origine des modifications tapées dans cet onglet
 const wsBase = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
 const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
-const baseName = (p) => p.split("/").pop().replace(/\.md$/i, "");
+const fileName = (p) => p.split("/").pop();
 const dirName = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const displayName = (p) => fileName(p).replace(/\.(md|markdown)$/i, "");
 const norm = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+const rawUrl = (p, download) => `/api/raw?path=${encodeURIComponent(p)}${download ? "&download=1" : ""}`;
+
+const isEditable = (p) => /\.(md|markdown|txt)$/i.test(p);
+const extOf = (p) => { const b = fileName(p); const i = b.lastIndexOf("."); return i > 0 ? b.slice(i + 1).toLowerCase() : ""; };
+const KIND_EXT = {
+  markdown: ["md", "markdown"], text: ["txt"], pdf: ["pdf"], image: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"],
+  docx: ["docx"], word: ["doc", "odt", "rtf", "pages"], sheet: ["xlsx", "xls", "ods", "csv", "numbers"], slides: ["pptx", "ppt", "odp", "key"],
+};
+const KIND_LABEL = { markdown: "Document", text: "Texte", pdf: "PDF", image: "Image", docx: "Word", word: "Document", sheet: "Tableur", slides: "Présentation", other: "Fichier" };
+function kindOf(p) { const e = extOf(p); for (const [k, list] of Object.entries(KIND_EXT)) if (list.includes(e)) return k; return "other"; }
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return `${n} o`;
+  if (n < 1048576) return `${Math.round(n / 1024)} Ko`;
+  return `${(n / 1048576).toFixed(1).replace(".", ",")} Mo`;
+}
 
 const ICONS = {
   branch: '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+  fileBlank: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
   folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   settings: '<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
@@ -32,12 +51,21 @@ const ICONS = {
   trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  unlink: '<path d="m18.84 12.25 1.72-1.71a4.95 4.95 0 0 0-7-7l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a4.95 4.95 0 0 0 7 7l1.71-1.71"/><path d="M8 2v3"/><path d="M2 8h3"/><path d="M16 22v-3"/><path d="M22 16h-3"/>',
 };
-const svg = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
   for (const el of $$("[data-icon]", root)) {
     if (el.dataset.drawn !== el.dataset.icon) { el.innerHTML = svg(el.dataset.icon); el.dataset.drawn = el.dataset.icon; }
   }
+}
+function iconFor(p) {
+  const k = kindOf(p);
+  if (k === "markdown" || k === "text") return svg("file");
+  if (k === "image") return svg("image", "k-image");
+  return svg("fileBlank", `k-${k}`);
 }
 
 function toast(msg, opts = {}) {
@@ -66,6 +94,16 @@ function relTime(ts) {
   const m = Math.round(s / 60);
   if (m < 60) return `il y a ${m} min`;
   return `il y a ${Math.round(m / 60)} h`;
+}
+
+/** Chemin d'un lien/image relatif dans un document, ou null (lien externe, ancre…). */
+function resolveRel(href, fromPath) {
+  if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("#") || href.startsWith("//")) return null;
+  try {
+    const base = "http://x/" + (dirName(fromPath) ? encPath(dirName(fromPath)) + "/" : "");
+    const u = new URL(href, base);
+    return decodeURIComponent(u.pathname.slice(1));
+  } catch (_e) { return null; }
 }
 
 /* ============================================================================================
@@ -152,7 +190,7 @@ function askName(first = false) {
 }
 
 /* ============================================================================================
- * Canal système : présence globale + notifications (liste des documents, changement de dépôt)
+ * Canal système : présence globale + notifications (liste des fichiers, changement de dépôt)
  * ========================================================================================== */
 const sysDoc = new Y.Doc();
 const sys = new WebsocketProvider(wsBase, "__system__", sysDoc, { disableBc: true });
@@ -181,17 +219,23 @@ function othersByPath() {
 }
 
 /* ============================================================================================
- * Liste des documents
+ * Liste des fichiers
  * ========================================================================================== */
 let files = [];
+const fileInfo = new Map(); // chemin → { size, kind }
 const closed = new Set(JSON.parse(localStorage.getItem("ed-closed") || "[]"));
+const currentPath = () => (S ? S.path : F ? F.path : null);
 
 async function refreshTree() {
   try {
     const d = await api("GET", "/api/files");
+    fileInfo.clear();
+    for (const f of d.files) fileInfo.set(f.path, f);
     files = d.files.map((f) => f.path).sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
     renderTree();
-  } catch (e) { toast("Impossible de lire la liste des documents : " + e.message, { error: true }); }
+    if (F && !fileInfo.has(F.path)) { toast("Ce fichier a été supprimé."); showEmpty(); }
+    else if (F) { F.size = fileInfo.get(F.path).size; renderStatus(); }
+  } catch (e) { toast("Impossible de lire la liste des fichiers : " + e.message, { error: true }); }
 }
 
 function buildTree(paths) {
@@ -211,11 +255,12 @@ function buildTree(paths) {
 
 function fileNode(p, others, showDir) {
   const el = document.createElement("div");
-  el.className = "node file" + (S && S.path === p ? " active" : "");
+  el.className = "node file" + (currentPath() === p ? " active" : "");
   el.title = p;
   el.dataset.path = p;
   const dots = (others.get(p) || []).slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
-  el.innerHTML = `${svg("file")}<span class="name">${esc(baseName(p))}${showDir && dirName(p) ? ` <span style="color:var(--muted);font-weight:400">· ${esc(dirName(p))}</span>` : ""}</span><span class="dots">${dots}</span>`;
+  const where = showDir && dirName(p) ? ` <span class="ext">· ${esc(dirName(p))}</span>` : "";
+  el.innerHTML = `${iconFor(p)}<span class="name">${esc(displayName(p))}${where}</span><span class="dots">${dots}</span>`;
   el.onclick = () => { openFile(p); $("#app").classList.remove("nav-open"); };
   return el;
 }
@@ -225,7 +270,7 @@ function renderTree() {
   const q = norm($("#search").value.trim());
   const others = othersByPath();
   tree.innerHTML = "";
-  if (!files.length) { tree.innerHTML = '<div class="tree-empty">Aucun document pour l\'instant.</div>'; return; }
+  if (!files.length) { tree.innerHTML = '<div class="tree-empty">Aucun fichier pour l\'instant.</div>'; return; }
   if (q) {
     const hits = files.filter((p) => norm(p).includes(q));
     if (!hits.length) tree.innerHTML = '<div class="tree-empty">Aucun résultat.</div>';
@@ -237,6 +282,7 @@ function renderTree() {
       const open = !closed.has(d.path);
       const row = document.createElement("div");
       row.className = "node folder" + (open ? " open" : "");
+      row.dataset.dir = d.path;
       row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}<span class="name">${esc(name)}</span>`;
       row.onclick = () => {
         if (closed.has(d.path)) closed.delete(d.path); else closed.add(d.path);
@@ -257,15 +303,16 @@ function renderTree() {
 }
 
 /* ============================================================================================
- * Session d'édition (un document ouvert)
+ * Session d'édition (document Markdown / texte ouvert)
  * ========================================================================================== */
 const ta = $("#editor");
 const paneEditor = $("#paneEditor");
 const area = $("#area");
 const marked = new Marked({ gfm: true, breaks: true });
-let S = null; // session courante
+let S = null; // document en cours d'édition
+let F = null; // fichier affiché (PDF, Word, image…)
 
-function setArea(state) { area.dataset.state = state; }
+function setArea(state, kind = "") { area.dataset.state = state; area.dataset.kind = kind; }
 function currentView() { return area.dataset.view; }
 
 function autosize() {
@@ -309,6 +356,8 @@ function applyLocal(value) {
 }
 
 function closeSession() {
+  F = null;
+  $("#paneFile").innerHTML = "";
   if (!S) return;
   const s = S;
   S = null;
@@ -320,6 +369,7 @@ function closeSession() {
 
 function showEmpty() {
   closeSession();
+  sys.awareness.setLocalStateField("path", null);
   setArea("empty");
   ta.value = "";
   $("#crumbs").innerHTML = "";
@@ -331,16 +381,24 @@ function showEmpty() {
 function renderCrumbs(p) {
   const parts = p.split("/");
   const segs = parts.slice(0, -1).map((x) => `<span class="seg">${esc(x)}</span><span class="sep">${svg("chevron")}</span>`).join("");
-  $("#crumbs").innerHTML = `${segs}<span class="cur">${esc(baseName(p))}</span>`;
+  $("#crumbs").innerHTML = `${segs}<span class="cur">${esc(displayName(p))}</span>`;
+}
+
+function enterPath(path) {
+  renderCrumbs(path);
+  document.title = `${displayName(path)} — Easydoc`;
+  history.replaceState(null, "", "#/" + encPath(path));
+  sys.awareness.setLocalStateField("path", path);
 }
 
 function openFile(path, opts = {}) {
+  if (!isEditable(path)) return openViewer(path);
   if (S && S.path === path && !opts.force) return;
   closeSession();
   const ydoc = new Y.Doc();
   const provider = new WebsocketProvider(wsBase, encPath(path), ydoc, { disableBc: true });
   const s = S = {
-    path, ydoc, provider,
+    path, ydoc, provider, kind: kindOf(path),
     ytext: ydoc.getText("content"), meta: ydoc.getMap("meta"),
     loaded: false, connected: false, offline: false, reconnecting: false,
     lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null,
@@ -348,14 +406,11 @@ function openFile(path, opts = {}) {
   s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set([LOCAL]), captureTimeout: 600 });
   provider.awareness.setLocalStateField("user", { name: me.name || "Anonyme", color: me.color }); // nom dans l'historique
 
-  setArea("loading");
+  setArea("loading", s.kind === "text" ? "text" : "");
   ta.readOnly = true;
   ta.value = "";
   ta.placeholder = "Chargement…";
-  renderCrumbs(path);
-  document.title = `${baseName(path)} — Easydoc`;
-  history.replaceState(null, "", "#/" + encPath(path));
-  sys.awareness.setLocalStateField("path", path);
+  enterPath(path);
   renderTree(); renderStatus(); renderPresence(); updateButtons();
 
   provider.on("status", (e) => {
@@ -399,9 +454,9 @@ function onLoaded(s) {
     showEmpty();
     return;
   }
-  setArea("doc");
+  setArea("doc", s.kind === "text" ? "text" : "");
   ta.readOnly = false;
-  ta.placeholder = "Commence à écrire… (Markdown)";
+  ta.placeholder = s.kind === "text" ? "Commence à écrire…" : "Commence à écrire… (Markdown)";
   ta.value = s.ytext.toString();
   autosize();
   if (s.pendingText != null && s.pendingText !== ta.value) {
@@ -441,9 +496,9 @@ async function startOffline(s) {
     const d = await api("GET", "/api/file?path=" + encodeURIComponent(s.path));
     if (S !== s) return;
     s.loaded = true;
-    setArea("doc");
+    setArea("doc", s.kind === "text" ? "text" : "");
     ta.readOnly = false;
-    ta.placeholder = "Commence à écrire… (Markdown)";
+    ta.placeholder = "Commence à écrire…";
     ta.value = d.content;
     autosize(); renderPreview(); renderStatus(); updateButtons();
     toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
@@ -509,31 +564,177 @@ function publishLine() {
 window.addEventListener("resize", () => { if (S && S.loaded) autosize(); });
 
 /* ============================================================================================
+ * Visionneuse (PDF, Word, images, autres fichiers)
+ * ========================================================================================== */
+function openViewer(path) {
+  if (F && F.path === path) return;
+  closeSession();
+  const info = fileInfo.get(path) || {};
+  const kind = kindOf(path);
+  F = { path, kind, size: info.size };
+  const f = F;
+  setArea("file");
+  enterPath(path);
+  const canConvert = kind === "docx" || kind === "pdf";
+  const badge = esc((extOf(path) || "?").toUpperCase().slice(0, 4));
+  const pane = $("#paneFile");
+  pane.innerHTML = `<div class="fileview">
+      <div class="filehead">
+        <div class="fileicon k-${kind}">${badge}</div>
+        <div class="filemeta"><div class="t">${esc(fileName(path))}</div><div class="s" id="fileMetaLine">${esc(KIND_LABEL[kind])}${info.size != null ? " · " + fmtSize(info.size) : ""}</div></div>
+        <div class="fileactions">
+          ${canConvert ? `<button class="btn" data-act="convert" title="Crée un document Markdown modifiable à plusieurs ; le fichier d'origine est conservé">${svg("pencil")}Créer une version modifiable</button>` : ""}
+          <a class="btn" href="${rawUrl(path, true)}" download="${esc(fileName(path))}" data-act="download">${svg("download")}Télécharger</a>
+        </div>
+      </div>
+      <div class="filebody" id="fileBody"></div>
+    </div>`;
+  const body = $("#fileBody", pane);
+  if (kind === "pdf") {
+    body.innerHTML = `<iframe class="pdf-frame" src="${rawUrl(path)}" title="${esc(fileName(path))}"></iframe>`;
+  } else if (kind === "image") {
+    body.innerHTML = `<div class="imgview"><img src="${rawUrl(path)}" alt="${esc(fileName(path))}" /></div>`;
+  } else if (kind === "docx") {
+    body.innerHTML = '<div class="loadingview">Préparation de l\'aperçu…</div>';
+    api("GET", "/api/preview?path=" + encodeURIComponent(path)).then((d) => {
+      if (F !== f) return;
+      body.innerHTML = `<div class="docview"><article class="prose" id="docxPreview"></article></div>`;
+      $("#docxPreview", body).innerHTML = DOMPurify.sanitize(d.html);
+    }).catch((e) => {
+      if (F !== f) return;
+      body.innerHTML = `<div class="nopreview">${svg("fileBlank")}<div>${esc(e.message)}</div></div>`;
+    });
+  } else {
+    body.innerHTML = `<div class="nopreview">${svg("fileBlank")}<div><strong>Pas d'aperçu pour ce type de fichier.</strong></div>
+      <div>Télécharge-le pour l'ouvrir avec ton logiciel habituel.</div></div>`;
+  }
+  if (canConvert) $('[data-act="convert"]', pane).onclick = () => convertFile(path);
+  renderTree(); renderStatus(); renderPresence(); updateButtons();
+}
+
+function convertFile(path) {
+  const kind = kindOf(path);
+  openModal({
+    title: "Créer une version modifiable",
+    subtitle: kind === "pdf"
+      ? "Le texte du PDF est copié dans un nouveau document Markdown, modifiable à plusieurs. La mise en page n'est pas conservée ; le PDF d'origine reste intact."
+      : "Le contenu du fichier Word est copié dans un nouveau document Markdown, modifiable à plusieurs. Titres, listes, gras, liens, tableaux et images sont conservés ; le fichier d'origine reste intact.",
+    body: '<div class="msg"></div>',
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Créer</button>',
+    onMount(card) {
+      $('[data-act="cancel"]', card).onclick = closeModal;
+      $('[data-act="ok"]', card).onclick = async () => {
+        $$(".m-foot button", card).forEach((b) => { b.disabled = true; });
+        setMsg(card, "Conversion en cours…");
+        try {
+          const d = await api("POST", "/api/convert", { path, author: me.name });
+          closeModal();
+          await refreshTree();
+          openFile(d.path);
+          toast(`Version modifiable créée : ${fileName(d.path)}${d.images ? ` (${d.images} image${d.images > 1 ? "s" : ""})` : ""}.`);
+        } catch (e) {
+          setMsg(card, e.message, "err");
+          $$(".m-foot button", card).forEach((b) => { b.disabled = false; });
+        }
+      };
+    },
+  });
+}
+
+/* ============================================================================================
+ * Import de fichiers (bouton + glisser-déposer)
+ * ========================================================================================== */
+let config = {};
+const currentFolder = () => (currentPath() ? dirName(currentPath()) : "");
+function cleanName(name) {
+  let n = name.normalize("NFC").replace(/[^\p{L}\p{N} _.()&+,'@[\]!~=-]/gu, "-").replace(/-{2,}/g, "-").replace(/^[.\s-]+/, "").trim();
+  if (!n) n = "fichier";
+  return n.slice(0, 120);
+}
+
+async function uploadFiles(list, folder = currentFolder()) {
+  const items = [...list].filter((f) => f && f.size !== undefined);
+  if (!items.length) return;
+  const maxMB = config.maxUploadMB || 25;
+  const where = folder ? `dans « ${folder} »` : "à la racine";
+  toast(items.length > 1 ? `Import de ${items.length} fichiers ${where}…` : `Import de « ${items[0].name} » ${where}…`);
+  let done = 0, last = null;
+  for (const f of items) {
+    if (f.size > maxMB * 1048576) { toast(`« ${f.name} » dépasse ${maxMB} Mo : non importé.`, { error: true }); continue; }
+    const name = cleanName(f.name);
+    const p = folder ? `${folder}/${name}` : name;
+    try {
+      const r = await fetch(`/api/upload?path=${encodeURIComponent(p)}&author=${encodeURIComponent(me.name)}`, {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: f,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || `erreur ${r.status}`);
+      done++; last = d.path;
+      if (d.renamed) toast(`« ${name} » existait déjà : importé sous « ${fileName(d.path)} ».`);
+    } catch (e) {
+      toast(`Échec de l'import de « ${f.name} » : ${e.message}`, { error: true });
+    }
+  }
+  await refreshTree();
+  if (done) {
+    toast(done > 1 ? `${done} fichiers importés.` : "Fichier importé.");
+    if (done === 1 && last) openFile(last);
+  }
+}
+
+const fileInput = $("#fileInput");
+const pickFiles = () => fileInput.click();
+fileInput.addEventListener("change", () => { uploadFiles(fileInput.files); fileInput.value = ""; });
+
+let dragDepth = 0;
+const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+window.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  const folder = currentFolder();
+  $("#dropzoneText").textContent = folder ? `Dépose tes fichiers pour les importer dans « ${folder} »` : "Dépose tes fichiers pour les importer";
+  document.body.classList.add("dragging");
+});
+window.addEventListener("dragover", (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+window.addEventListener("dragleave", (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) document.body.classList.remove("dragging");
+});
+window.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove("dragging");
+  // déposé sur un dossier de la liste : import dans ce dossier
+  const dirRow = e.target.closest && e.target.closest(".node.folder");
+  uploadFiles(e.dataTransfer.files, dirRow ? dirRow.dataset.dir : currentFolder());
+});
+
+/* ============================================================================================
  * Aperçu Markdown
  * ========================================================================================== */
 let previewT = null;
 function schedulePreview() { clearTimeout(previewT); previewT = setTimeout(renderPreview, 150); }
 function renderPreview() {
-  if (!S || currentView() === "edit") return;
-  const html = DOMPurify.sanitize(marked.parse(ta.value || ""));
+  if (!S || S.kind !== "markdown" || currentView() === "edit") return;
   const el = $("#preview");
-  el.innerHTML = html;
+  el.innerHTML = DOMPurify.sanitize(marked.parse(ta.value || ""));
   for (const a of $$("a[href]", el)) {
-    const href = a.getAttribute("href");
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) { a.target = "_blank"; a.rel = "noopener noreferrer"; }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(a.getAttribute("href"))) { a.target = "_blank"; a.rel = "noopener noreferrer"; }
+  }
+  // images du dépôt (chemins relatifs) servies par Easydoc
+  for (const img of $$("img[src]", el)) {
+    const target = resolveRel(img.getAttribute("src"), S.path);
+    if (target) img.src = rawUrl(target);
   }
 }
 $("#preview").addEventListener("click", (e) => {
   const a = e.target.closest("a[href]");
   if (!a || !S) return;
-  const href = a.getAttribute("href");
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("#")) return;
-  // lien relatif vers un autre document du dépôt : on l'ouvre dans Easydoc
-  try {
-    const u = new URL(href, "http://x/" + (dirName(S.path) ? encPath(dirName(S.path)) + "/" : ""));
-    const target = decodeURIComponent(u.pathname.slice(1));
-    if (files.includes(target)) { e.preventDefault(); openFile(target); }
-  } catch (_e) {}
+  const target = resolveRel(a.getAttribute("href"), S.path);
+  if (target && files.includes(target)) { e.preventDefault(); openFile(target); }
 });
 
 function setView(v) {
@@ -551,7 +752,11 @@ for (const b of $$("#viewSwitch button")) b.onclick = () => setView(b.dataset.vi
 function renderStatus() {
   const el = $("#status");
   let text = "", tone = "", title = "";
-  if (S) {
+  if (F) {
+    text = `${KIND_LABEL[F.kind]}${F.size != null ? " · " + fmtSize(F.size) : ""}`;
+    const line = $("#fileMetaLine");
+    if (line) line.textContent = text;
+  } else if (S) {
     const err = S.meta.get("saveError");
     if (!S.loaded) { text = "Chargement…"; tone = "busy"; }
     else if (S.offline) { text = S.dirty ? "Hors ligne · enregistrement…" : "Hors ligne · enregistré"; tone = "busy"; }
@@ -568,28 +773,29 @@ setInterval(renderStatus, 10000);
 
 function renderPresence() {
   const box = $("#presence");
-  if (!S) { box.innerHTML = ""; return; }
-  const list = othersByPath().get(S.path) || [];
-  const shown = list.slice(0, 4).map((u) => avatarHTML(u, `title="${esc(u.name)}${u.line ? ` — ligne ${esc(u.line)}` : ""}"`)).join("");
+  const p = currentPath();
+  if (!p) { box.innerHTML = ""; return; }
+  const list = othersByPath().get(p) || [];
+  const shown = list.slice(0, 4).map((u) => avatarHTML(u, `title="${esc(u.name)}${u.line && S ? ` — ligne ${esc(u.line)}` : ""}"`)).join("");
   const more = list.length > 4 ? `<span class="avatar more" title="${list.length - 4} autres">+${list.length - 4}</span>` : "";
   box.innerHTML = shown + more;
 }
 
 function updateButtons() {
-  const has = !!(S && S.loaded);
-  $("#btnSave").disabled = !has;
-  $("#btnDelete").disabled = !S;
-  $("#viewSwitch").style.visibility = S ? "visible" : "hidden";
+  $("#btnSave").disabled = !(S && S.loaded);
+  $("#btnSave").style.display = F ? "none" : "";
+  $("#btnDelete").disabled = !currentPath();
+  $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
 /* ============================================================================================
  * Actions
  * ========================================================================================== */
 function newDocument() {
-  const folder = S ? dirName(S.path) : "";
+  const folder = currentFolder();
   openModal({
     title: "Nouveau document",
-    subtitle: "Utilise « / » pour ranger dans un dossier. L'extension .md est ajoutée automatiquement.",
+    subtitle: "Utilise « / » pour ranger dans un dossier. L'extension .md est ajoutée automatiquement (ou termine par .txt pour un texte brut).",
     body: `<div class="field"><label for="fPath">Nom</label><input class="input" id="fPath" placeholder="notes/compte-rendu" value="${esc(folder ? folder + "/" : "")}" /></div><div class="msg"></div>`,
     foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Créer</button>',
     onMount(card) {
@@ -614,10 +820,10 @@ function newDocument() {
 }
 
 function deleteDocument() {
-  if (!S) return;
-  const p = S.path;
+  const p = currentPath();
+  if (!p) return;
   openModal({
-    title: "Supprimer ce document ?",
+    title: isEditable(p) ? "Supprimer ce document ?" : "Supprimer ce fichier ?",
     subtitle: `« ${esc(p)} » sera supprimé du dépôt (un commit de suppression est créé ; il reste récupérable dans l'historique git).`,
     foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-danger" data-act="ok">Supprimer</button>',
     onMount(card) {
@@ -629,7 +835,7 @@ function deleteDocument() {
           closeModal();
           showEmpty();
           await refreshTree();
-          toast("Document supprimé.");
+          toast("Supprimé.");
         } catch (e) { closeModal(); toast("Suppression impossible : " + e.message, { error: true }); }
       };
     },
@@ -647,10 +853,30 @@ async function syncNow() {
   finally { b.disabled = false; }
 }
 
-let config = {};
 async function loadConfig() {
   try { config = await api("GET", "/api/config"); } catch (_e) { config = {}; }
   $("#workspaceLabel").textContent = config.mode === "github" ? `${config.repo}${config.branch && config.branch !== "main" ? ` (${config.branch})` : ""}` : "Dépôt local";
+}
+
+function confirmDisconnect(s) {
+  openModal({
+    title: "Déconnecter ce dépôt ?",
+    subtitle: `Easydoc oublie <strong>${esc(s.repo)}</strong> : le jeton d'accès est effacé de ce serveur et les fichiers ne sont plus lus ni enregistrés sur GitHub.`,
+    body: `<div class="note">Le dépôt sur GitHub n'est ni modifié ni supprimé : tout ce qui y a été enregistré reste disponible.
+      Easydoc revient aux fichiers stockés sur ce serveur ; tu pourras connecter un autre dépôt quand tu veux.</div><div class="msg"></div>`,
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-danger" data-act="ok">Déconnecter</button>',
+    onMount(c) {
+      $('[data-act="cancel"]', c).onclick = () => openSettings();
+      $('[data-act="ok"]', c).onclick = async () => {
+        $$(".m-foot button", c).forEach((b) => { b.disabled = true; });
+        try {
+          await api("POST", "/api/settings", { mode: "local" });
+          setMsg(c, "Dépôt déconnecté. Rechargement…", "ok");
+          setTimeout(() => location.reload(), 700);
+        } catch (e) { setMsg(c, e.message, "err"); $$(".m-foot button", c).forEach((b) => { b.disabled = false; }); }
+      };
+    },
+  });
 }
 
 async function openSettings() {
@@ -658,22 +884,22 @@ async function openSettings() {
   try { s = await api("GET", "/api/settings"); } catch (_e) {}
   const gh = s.mode === "github";
   const card = gh
-    ? `<div class="card">${svg("branch")}<div><div class="t">${esc(s.repo)}</div><div class="s">Branche ${esc(s.branch)}${s.login ? ` · connecté en tant que ${esc(s.login)}` : ""}</div></div></div>`
-    : `<div class="card">${svg("database")}<div><div class="t">Dépôt local</div><div class="s">Les documents sont enregistrés sur ce serveur (git local).</div></div></div>`;
+    ? `<div class="card">${svg("branch")}<div style="flex:1;min-width:0"><div class="t">${esc(s.repo)}</div><div class="s">Branche ${esc(s.branch)}${s.login ? ` · connecté en tant que ${esc(s.login)}` : ""}</div></div>
+        <button class="btn btn-danger-soft" data-act="disconnect">${svg("unlink")}Déconnecter</button></div>`
+    : `<div class="card">${svg("database")}<div><div class="t">Dépôt local</div><div class="s">Aucun dépôt GitHub : les fichiers sont enregistrés sur ce serveur.</div></div></div>`;
   openModal({
     title: "Dépôt",
-    subtitle: "Les documents sont lus et enregistrés dans ce dépôt. Chaque enregistrement crée un commit.",
+    subtitle: gh ? "Pour passer à un autre dépôt, indique-le ci-dessous puis clique sur Connecter." : "Connecte un dépôt GitHub pour y enregistrer les fichiers (un commit par enregistrement).",
     body: `${card}
-      <div class="field"><label for="fRepo">Dépôt GitHub</label>
-        <input class="input" id="fRepo" placeholder="propriétaire/dépôt ou URL GitHub" value="${esc(s.repo || "")}" /></div>
+      <div class="field"><label for="fRepo">${gh ? "Autre dépôt GitHub" : "Dépôt GitHub"}</label>
+        <input class="input" id="fRepo" placeholder="propriétaire/dépôt ou URL GitHub" value="" /></div>
       <div class="field"><label for="fToken">Jeton d'accès</label>
         <input class="input" id="fToken" type="password" autocomplete="off" placeholder="${s.hasToken ? "Laisser vide pour garder le jeton actuel" : "ghp_… ou github_pat_…"}" />
         <span class="hint">Jeton avec accès en écriture au dépôt (classique : permission <code>repo</code> ; fin : Contents en lecture/écriture). <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">Créer un jeton</a></span></div>
       <div class="field"><label for="fBranch">Branche <span style="color:var(--muted);font-weight:400">(facultatif)</span></label>
-        <input class="input" id="fBranch" placeholder="branche par défaut du dépôt" value="${esc(gh ? s.branch : "")}" /></div>
+        <input class="input" id="fBranch" placeholder="branche par défaut du dépôt" value="" /></div>
       <div class="msg"></div>`,
-    foot: `${gh ? '<button class="linkish left" data-act="local">Passer en dépôt local</button>' : ""}
-      <button class="btn" data-act="test">Tester</button><button class="btn btn-primary" data-act="save">Connecter</button>`,
+    foot: '<button class="btn" data-act="test">Tester</button><button class="btn btn-primary" data-act="save">Connecter</button>',
     onMount(c) {
       const vals = () => ({ githubRepo: $("#fRepo", c).value, githubToken: $("#fToken", c).value, githubBranch: $("#fBranch", c).value });
       const busy = (on) => $$(".m-foot button", c).forEach((b) => { b.disabled = on; });
@@ -686,6 +912,7 @@ async function openSettings() {
         busy(false);
       };
       $('[data-act="save"]', c).onclick = async () => {
+        if (!$("#fRepo", c).value.trim()) { setMsg(c, "Indique le dépôt à connecter.", "err"); $("#fRepo", c).focus(); return; }
         busy(true); setMsg(c, "Connexion…");
         try {
           const d = await api("POST", "/api/settings", { mode: "github", ...vals() });
@@ -693,12 +920,8 @@ async function openSettings() {
           setTimeout(() => location.reload(), 700);
         } catch (e) { setMsg(c, e.message, "err"); busy(false); }
       };
-      const l = $('[data-act="local"]', c);
-      if (l) l.onclick = async () => {
-        busy(true);
-        try { await api("POST", "/api/settings", { mode: "local" }); setMsg(c, "Dépôt local activé. Rechargement…", "ok"); setTimeout(() => location.reload(), 700); }
-        catch (e) { setMsg(c, e.message, "err"); busy(false); }
-      };
+      const dc = $('[data-act="disconnect"]', c);
+      if (dc) dc.onclick = () => confirmDisconnect(s);
     },
   });
 }
@@ -708,6 +931,8 @@ async function openSettings() {
  * ========================================================================================== */
 $("#btnNew").onclick = newDocument;
 $("#btnNewEmpty").onclick = newDocument;
+$("#btnUpload").onclick = pickFiles;
+$("#btnUploadEmpty").onclick = pickFiles;
 $("#btnDelete").onclick = deleteDocument;
 $("#btnSave").onclick = () => saveNow(true);
 $("#btnSync").onclick = syncNow;
@@ -729,7 +954,7 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("hashchange", () => {
   const p = pathFromHash();
-  if (p && (!S || S.path !== p)) openFile(p);
+  if (p && p !== currentPath()) openFile(p);
 });
 window.addEventListener("error", (ev) => toast("Erreur de l'interface : " + (ev.message || "inconnue"), { error: true }));
 
@@ -748,7 +973,7 @@ function pathFromHash() {
   await loadConfig();
   await refreshTree();
   const wanted = pathFromHash();
-  const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files[0];
+  const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files.find(isEditable) || files[0];
   if (target) openFile(target); else showEmpty();
   updateButtons();
 })();

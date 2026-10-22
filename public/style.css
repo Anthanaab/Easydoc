@@ -219,6 +219,52 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .toast.err { background: var(--danger); color: #fff; }
 
 /* Petits écrans */
+.tool-row { display: flex; gap: 6px; }
+.tool-row #btnNew { flex: 1; justify-content: center; }
+.btn-icon { width: 34px; padding: 0; justify-content: center; flex: none; }
+.empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.btn-danger-soft { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--line-strong)); background: var(--bg); }
+.btn-danger-soft:hover { background: color-mix(in srgb, var(--danger) 8%, var(--bg)); }
+
+/* Types de fichiers (liste + visionneuse) */
+.node .k-pdf { color: #dc2626; }
+.node .k-docx, .node .k-word { color: #2563eb; }
+.node .k-sheet { color: #16a34a; }
+.node .k-slides { color: #ea580c; }
+.node .k-image { color: #9333ea; }
+.node .ext { color: var(--muted); font-weight: 400; }
+
+.pane-file { display: none; }
+.area[data-state="file"] .pane-file { display: block; }
+.area[data-state="file"] .pane-editor, .area[data-state="file"] .pane-preview { display: none !important; }
+.area[data-kind="text"] .pane-preview { display: none; }
+.area[data-kind="text"] .pane-editor { display: block; }
+.fileview { max-width: 1040px; height: 100%; margin: 0 auto; padding: 24px 28px 28px; display: flex; flex-direction: column; gap: 16px; }
+.filehead { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft); flex-wrap: wrap; }
+.fileicon { width: 40px; height: 40px; flex: none; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font: 700 10px/1 var(--font); letter-spacing: .02em; background: #6b7280; }
+.fileicon.k-pdf { background: #dc2626; } .fileicon.k-docx, .fileicon.k-word { background: #2563eb; }
+.fileicon.k-sheet { background: #16a34a; } .fileicon.k-slides { background: #ea580c; } .fileicon.k-image { background: #9333ea; }
+.filemeta { min-width: 0; flex: 1; }
+.filemeta .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filemeta .s { font-size: 12px; color: var(--muted); }
+.fileactions { display: flex; gap: 8px; flex-wrap: wrap; }
+.filebody { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pdf-frame { flex: 1; width: 100%; min-height: 65vh; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.imgview { text-align: center; }
+.imgview img { max-width: 100%; max-height: 75vh; border-radius: 8px; border: 1px solid var(--line); background: repeating-conic-gradient(var(--bg-soft) 0 25%, var(--bg) 0 50%) 0 0/16px 16px; }
+.docview { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.docview .prose { padding: 32px 40px; }
+.nopreview, .loadingview { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 48px 16px; color: var(--muted); text-align: center; border: 1px dashed var(--line-strong); border-radius: 10px; }
+.nopreview svg.i { width: 34px; height: 34px; stroke-width: 1.3; }
+.note { font-size: 12.5px; color: var(--muted); }
+
+/* Glisser-déposer */
+.dropzone { position: fixed; inset: 0; z-index: 80; display: none; align-items: center; justify-content: center; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 10%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; }
+body.dragging .dropzone { display: flex; }
+.dropzone-card { display: flex; align-items: center; gap: 10px; padding: 16px 22px; border-radius: 12px; background: var(--bg); box-shadow: var(--shadow-lg); font-weight: 600; }
+.dropzone-card svg.i { width: 22px; height: 22px; color: var(--accent); }
+
 .only-mobile { display: none; }
 .scrim { display: none; }
 @media (max-width: 900px) {

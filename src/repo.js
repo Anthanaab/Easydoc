@@ -1,11 +1,12 @@
 /**
- * repo.js — Couche d'accès aux documents Markdown.
+ * repo.js — accès aux fichiers du dépôt.
  *
  * Deux modes :
  *  - github : jeton + dépôt renseignés → API GitHub (chaque enregistrement = un commit).
  *  - local  : dépôt git local dans localRepoDir, 100 % auto-hébergé.
  *
- * Les chemins reçus ici sont déjà validés par safeDocPath() (voir paths.js).
+ * Les chemins reçus ici sont déjà validés par safeFilePath() (voir paths.js).
+ * Le contenu écrit peut être du texte (documents) ou un Buffer (PDF, Word, images…).
  */
 "use strict";
 
@@ -13,6 +14,9 @@ const fs = require("fs");
 const path = require("path");
 const { Octokit } = require("@octokit/rest");
 const { simpleGit } = require("simple-git");
+const { isHidden } = require("./paths");
+
+const toBuf = (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), "utf8"));
 
 class RepoService {
   constructor(options) {
@@ -44,10 +48,6 @@ class RepoService {
     try { await this.git.addConfig("user.email", "easydoc@local", false, "local"); } catch (_e) {}
   }
 
-  label() {
-    return this.mode === "github" ? this.options.githubRepo : "dépôt local";
-  }
-
   _split() {
     const [owner, repo] = this.options.githubRepo.split("/");
     return { owner, repo };
@@ -73,7 +73,7 @@ class RepoService {
     }
   }
 
-  /** Liste des fichiers Markdown. */
+  /** Liste de tous les fichiers (hors fichiers et dossiers cachés). */
   async listFiles() {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
@@ -82,7 +82,7 @@ class RepoService {
           owner, repo, tree_sha: this.options.githubBranch, recursive: "1",
         });
         return (data.tree || [])
-          .filter((t) => t.type === "blob" && /\.md$/i.test(t.path))
+          .filter((t) => t.type === "blob" && !isHidden(t.path))
           .map((t) => ({ path: t.path, size: t.size || 0 }));
       } catch (e) {
         if (e.status === 404 || e.status === 409) return []; // dépôt vide / branche absente
@@ -96,15 +96,15 @@ class RepoService {
         const full = path.join(dir, ent.name);
         const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
         if (ent.isDirectory()) walk(full, rel);
-        else if (/\.md$/i.test(ent.name)) out.push({ path: rel, size: fs.statSync(full).size });
+        else if (ent.isFile()) out.push({ path: rel, size: fs.statSync(full).size });
       }
     };
     walk(this.options.localRepoDir, "");
     return out;
   }
 
-  /** Lit un fichier. Retourne { content, sha } ou null. */
-  async readFile(rel) {
+  /** Lit un fichier brut. Retourne { buf, sha } ou null. */
+  async readRaw(rel) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
       try {
@@ -113,34 +113,42 @@ class RepoService {
           headers: { "If-None-Match": "" }, // pas de cache HTTP : on veut la dernière version
         });
         if (Array.isArray(data) || data.type !== "file") return null;
-        let content;
-        if (data.content) content = Buffer.from(data.content, "base64").toString("utf8");
+        let buf;
+        if (data.encoding === "base64" && data.content) buf = Buffer.from(data.content, "base64");
+        else if (!data.size) buf = Buffer.alloc(0);
         else {
           // fichiers > 1 Mo : contenu via l'API blobs
           const blob = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: data.sha });
-          content = Buffer.from(blob.data.content, "base64").toString("utf8");
+          buf = Buffer.from(blob.data.content, "base64");
         }
-        return { content, sha: data.sha };
+        return { buf, sha: data.sha };
       } catch (e) {
         if (e.status === 404 || e.status === 409) return null;
         throw e;
       }
     }
     const full = this._local(rel);
-    if (!fs.existsSync(full)) return null;
-    return { content: fs.readFileSync(full, "utf8"), sha: null };
+    if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+    return { buf: fs.readFileSync(full), sha: null };
+  }
+
+  /** Lit un document texte. Retourne { content, sha } ou null. */
+  async readFile(rel) {
+    const r = await this.readRaw(rel);
+    return r ? { content: r.buf.toString("utf8"), sha: r.sha } : null;
   }
 
   /** Écrit un fichier (github : commit ; local : écriture + commit). Ne fait rien si inchangé. */
   async writeFile(rel, content, message) {
+    const buf = toBuf(content);
     if (this.mode === "github") {
       const { owner, repo } = this._split();
       for (let attempt = 0; attempt < 3; attempt++) {
-        const exist = await this.readFile(rel);
-        if (exist && exist.content === content) return { committed: false };
+        const exist = await this.readRaw(rel);
+        if (exist && exist.buf.equals(buf)) return { committed: false };
         const body = {
           owner, repo, path: rel, message, branch: this.options.githubBranch,
-          content: Buffer.from(content, "utf8").toString("base64"),
+          content: buf.toString("base64"),
         };
         if (exist) body.sha = exist.sha;
         try {
@@ -153,9 +161,9 @@ class RepoService {
       }
     }
     const full = this._local(rel);
-    if (fs.existsSync(full) && fs.readFileSync(full, "utf8") === content) return { committed: false };
+    if (fs.existsSync(full) && fs.readFileSync(full).equals(buf)) return { committed: false };
     fs.mkdirSync(path.dirname(full), { recursive: true });
-    fs.writeFileSync(full, content, "utf8");
+    fs.writeFileSync(full, buf);
     try {
       await this.git.add(rel);
       await this.git.commit(message);
@@ -169,7 +177,7 @@ class RepoService {
   async deleteFile(rel, message) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
-      const exist = await this.readFile(rel);
+      const exist = await this.readRaw(rel);
       if (!exist) return { deleted: false };
       await this.octokit.rest.repos.deleteFile({
         owner, repo, path: rel, message, sha: exist.sha, branch: this.options.githubBranch,
@@ -179,6 +187,10 @@ class RepoService {
     const full = this._local(rel);
     if (!fs.existsSync(full)) return { deleted: false };
     fs.unlinkSync(full);
+    // supprime les dossiers devenus vides
+    let dir = path.dirname(full);
+    const root = path.resolve(this.options.localRepoDir);
+    while (dir !== root && dir.startsWith(root) && fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); dir = path.dirname(dir); }
     try {
       await this.git.rm(rel);
       await this.git.commit(message);
@@ -188,15 +200,16 @@ class RepoService {
     return { deleted: true };
   }
 
-  /** Crée quelques documents de départ si le dépôt ne contient aucun Markdown. */
+  /** Crée quelques documents de départ si le dépôt est vide. */
   async seedIfEmpty() {
     const files = await this.listFiles();
     if (files.length > 0) return false;
     const seed = {
       "README.md":
-        "# Bienvenue\n\nCet espace est partagé : chaque document est un fichier Markdown du dépôt,\n" +
+        "# Bienvenue\n\nCet espace est partagé : chaque document est un fichier du dépôt,\n" +
         "édité à plusieurs en temps réel et enregistré automatiquement (un commit par enregistrement).\n\n" +
-        "## Pour commencer\n\n- Crée un document avec le bouton **+** de la barre latérale\n" +
+        "## Pour commencer\n\n- Crée un document avec le bouton **Nouveau document**\n" +
+        "- Importe des PDF, des fichiers Word ou des images (bouton d'import ou glisser-déposer)\n" +
         "- Organise-les en dossiers : `notes/idees.md`, `specs/v1.md`…\n" +
         "- Un agent IA (Claude…) peut travailler sur le même dépôt : ses commits apparaissent ici automatiquement.\n",
       "CLAUDE.md":
