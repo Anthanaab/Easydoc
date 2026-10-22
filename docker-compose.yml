@@ -1,0 +1,20 @@
+services:
+  easydoc:
+    build: .
+    image: easydoc:latest
+    container_name: easydoc
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITHUB_REPO: "${GITHUB_REPO:-}"
+      GITHUB_BRANCH: "${GITHUB_BRANCH:-main}"
+      LOCAL_REPO_DIR: "/app/data/localrepo"
+    volumes:
+      # Données auto-hébergées (mode local / base de documents) persistées
+      - gamevault_data:/app/data
+
+volumes:
+  gamevault_data:
