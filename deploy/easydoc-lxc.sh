@@ -173,12 +173,10 @@ if [ "$USAGE" = create ]; then
     done
   fi
 
-  while :; do
-    ask TOKEN --passwordbox "Jeton GitHub (scope repo)\\n\\nNécessaire pour que l'app publie les documents (commits) et relise Claude.\\nCommence par ghp_ ou github_pat_ — voir github.com/settings/tokens." 12 74 "$TOKEN"
-    [ -z "$TOKEN" ] && { warn "Sans jeton, la publication GitHub échouera — vous pourrez le rajouter dans /opt/easydoc/.env."; break; }
-    [[ "$TOKEN" =~ ^(ghp_|github_pat_) ]] && break
-    msg "Ce n'est pas un jeton GitHub (il commence par ghp_ ou github_pat_)." 8 70
-  done
+  # Aucun jeton demandé ici : l'installation se fait sans configuration, et le dépôt
+  # GitHub (avec son jeton) se connecte ensuite depuis l'interface (⚙️ Réglages).
+  # Pour préconfigurer quand même : EASYDOC_TOKEN=... devant la commande.
+  TOKEN="${EASYDOC_TOKEN:-}"
 
   case "$OSV" in
     debian-12) TPL_PATTERN='^debian-12-standard'; OSTYPE=debian ;;
@@ -194,7 +192,7 @@ Mémoire    : $RAM Mo (+ $SWAP Mo de swap)
 Disque     : $DISK Go sur $STORAGE
 Réseau     : ${BRIDGE:-vmbr0}, IP $IPLABEL${VLAN:+, VLAN $VLAN}
 Options    : $([ "$UNPRIV" = 1 ] && echo "non privilégié" || echo "privilégié")$([ "$ONBOOT" = 1 ] && echo ", démarrage auto")
-Jeton      : $([ -n "$TOKEN" ] && echo "fourni" || echo "ABSENT (à mettre dans /opt/easydoc/.env)")"
+GitHub     : à connecter après installation, depuis l'interface (⚙️ Réglages)"
   yesno "Récapitulatif :\\n\\n$SUMMARY\\n\\nCréer le conteneur et déployer Easydoc ?" 20 74 || { clear; echo "Installation annulée."; exit 0; }
   clear
 fi

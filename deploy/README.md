@@ -11,7 +11,10 @@ Deux scripts, même logique que `Easy3D` :
 
 - Un nœud Proxmox VE 7/8/9 accessible en shell root.
 - Des stockages « rootdir » et « vztmpl » (presque toujours là).
-- Un **jeton GitHub** (scope `repo`) pour que l'app publie les documents — celui que tu utilises déjà.
+
+**Aucun jeton requis à l'installation** : Easydoc démarre en mode local, puis tu connectes
+n'importe quel dépôt GitHub **depuis l'interface** (bouton ⚙️ Réglages) — jeton, repo et
+branche s'y saisissent, avec un test de connexion avant enregistrement.
 
 ## Utilisation (hôte Proxmox)
 
@@ -35,7 +38,7 @@ bash easydoc-lxc.sh update <ctid>     # mise à jour (git pull + npm + restart) 
 bash easydoc-lxc.sh destroy <ctid>    # supprime le conteneur (avec confirmation)
 
 EASYDOC_DRYRUN=1 bash easydoc-lxc.sh  # simulation : affiche les commandes sans rien créer
-EASYDOC_TOKEN=ghp_... bash easydoc-lxc.sh   # fournit le jeton sans le taper dans le menu
+EASYDOC_TOKEN=ghp_... bash easydoc-lxc.sh   # préconfigure le jeton dès l'installation (optionnel)
 ```
 
 ## Ce que provision.sh fait dans le conteneur
@@ -51,8 +54,9 @@ EASYDOC_TOKEN=ghp_... bash easydoc-lxc.sh   # fournit le jeton sans le taper dan
 
 ## Astuces
 
-- **Ton jeton est passé en mode « avancé » ?** Il est stocké dans `/opt/easydoc/.env`
-  (lisible seulement par root) — modifiable là ou via `EASYDOC_TOKEN` à la prochaine mise à jour.
+- **Jeton / dépôt** : tout se connecte depuis l'interface (⚙️ Réglages) — test de connexion
+  intégré, bascule à chaud sans redémarrage, persisté dans `/opt/easydoc/data/config.json`
+  (lisible seulement par root ; modifiable aussi à la main, puis `systemctl restart easydoc`).
 - **Service** : `pct enter <ctid>` puis `systemctl status easydoc`, logs : `journalctl -u easydoc -f`.
 - **Mise à jour du code** : `bash easydoc-lxc.sh update <ctid>` (ou relancer `provision.sh`).
-- **Données** : tout est dans le repo GitHub (mode connecté) ; rien de critique sur le disque du conteneur.
+- **Données** : tout est dans le repo GitHub connecté ; rien de critique sur le disque du conteneur.

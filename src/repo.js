@@ -24,11 +24,20 @@ class RepoService {
   }
 
   async init() {
+    await this.switch(this.options);
+  }
+
+  /** Bascule le dépôt actif à chaud (appelé au démarrage ET depuis l'interface). */
+  async switch(opts) {
+    this.options = { ...this.options, ...opts };
+    this.mode = this.options.githubRepo && this.options.githubToken ? "github" : "local";
     if (this.mode === "github") {
       this.octokit = new Octokit({ auth: this.options.githubToken });
+      this.git = null;
       return;
     }
     // Mode LOCAL
+    this.octokit = null;
     const dir = this.options.localRepoDir;
     fs.mkdirSync(dir, { recursive: true });
     this.git = simpleGit(dir);

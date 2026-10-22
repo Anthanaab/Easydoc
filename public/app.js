@@ -272,6 +272,85 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+// ----- Fenêtre de réglages : connecter / changer de dépôt -----------------------------
+const modal = $("#settingsModal");
+const setInfo = $("#setInfo");
+function setInfoMsg(msg, ok) {
+  setInfo.textContent = msg;
+  setInfo.className = "set-info " + (ok ? "ok" : "err");
+}
+function ghModeSelected() {
+  const gh = document.querySelector('input[name="setmode"]:checked').value === "github";
+  $("#ghFields").classList.toggle("hidden", !gh);
+  $("#localFields").classList.toggle("hidden", gh);
+}
+async function loadSettingsForm() {
+  try {
+    const s = await (await fetch("/api/settings")).json();
+    document.querySelector('input[name="setmode"][value="' + (s.mode === "github" ? "github" : "local") + '"]').checked = true;
+    $("#setRepo").value = s.repo || "";
+    $("#setBranch").value = s.branch || "";
+    $("#setCurrent").innerHTML =
+      s.mode === "github"
+        ? `Connecté à <b>${esc(s.repo)}</b> (branche ${esc(s.branch)}, jeton ${s.hasToken ? "présent" : "absent"})`
+        : "Mode <b>local</b> — aucun dépôt GitHub connecté.";
+    ghModeSelected();
+  } catch (e) { setInfoMsg("Impossible de lire les réglages: " + e.message, false); }
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+
+$("#btnSettings").onclick = () => { modal.classList.remove("hidden"); setInfoMsg("", true); loadSettingsForm(); };
+$("#btnCloseSettings").onclick = () => modal.classList.add("hidden");
+modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.add("hidden"); });
+document.querySelectorAll('input[name="setmode"]').forEach((r) => r.addEventListener("change", ghModeSelected));
+
+$("#btnTest").onclick = async () => {
+  setInfoMsg("Test en cours…", true);
+  const r = await fetch("/api/settings/test", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ githubToken: $("#setToken").value || null, githubRepo: $("#setRepo").value }),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    let extra = d.repo ? ` → <b>${esc(d.repo.full_name)}</b>${d.repo.private ? " (privé)" : " (public)"}, branche par défaut : ${esc(d.repo.default_branch)}` : "";
+    setInfoMsg(`✅ Jeton valide pour <b>${esc(d.user)}</b>${extra}`, true);
+  } else setInfoMsg("✗ " + (d.error || "échec"), false);
+};
+$("#btnSaveSettings").onclick = async () => {
+  setInfoMsg("Connexion…", true);
+  const r = await fetch("/api/settings", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "github",
+      githubToken: $("#setToken").value || null,
+      githubRepo: $("#setRepo").value,
+      githubBranch: $("#setBranch").value || null,
+    }),
+  });
+  const d = await r.json();
+  if (d.ok) { setInfoMsg(`✅ Connecté à ${esc(d.repo)} (${esc(d.user)}) — reconnexion…`, true); setTimeout(() => location.reload(), 900); }
+  else setInfoMsg("✗ " + (d.error || "échec"), false);
+};
+$("#btnLocalSave").onclick = async () => {
+  setInfoMsg("Bascule en mode local…", true);
+  const r = await fetch("/api/settings", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "local" }),
+  });
+  const d = await r.json();
+  if (d.ok) { setInfoMsg("✅ Mode local — reconnexion…", true); setTimeout(() => location.reload(), 900); }
+  else setInfoMsg("✗ " + (d.error || "échec"), false);
+};
+
+// Recharge automatiquement si le dépôt connecté change (bascule faite ailleurs/par un autre onglet)
+let knownVersion = null;
+setInterval(async () => {
+  try {
+    const c = await (await fetch("/api/config")).json();
+    if (knownVersion === null) { knownVersion = c.version; return; }
+    if (c.version !== knownVersion) { knownVersion = c.version; location.reload(); }
+  } catch (_e) {}
+}, 4000);
+
 document.title = `Easydoc · ${ME.name}`;
 
 // ----- Démarrage -----

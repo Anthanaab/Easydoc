@@ -45,18 +45,22 @@ npm start                 # → http://localhost:3000
 Sans token GitHub, ça tourne sur un **dépôt git local** (`data/localrepo`) : tout est
 auto-hébergé et testable immédiatement.
 
-## 🔗 Pour synchroniser avec ton dépôt GitHub (et collaborer avec Claude)
+## 🔗 Connecter un dépôt GitHub — directement depuis l'interface
+
+Pas besoin de configurer quoi que ce soit à l'installation : clique sur **⚙️ Réglages**
+dans l'interface et connecte **n'importe quel dépôt** (personnel, organisation…).
 
 1. Crée un **Personal Access Token** (classique, scope `repo`) :
    https://github.com/settings/tokens
-2. Mets-le dans `.env` (ou les variables d'environnement Docker) :
-   ```
-   GITHUB_TOKEN=ghp_xxx
-   GITHUB_REPO=Anthanaab/mon-jeu
-   GITHUB_BRANCH=main
-   ```
-3. Relance. Easydoc crée alors l'arborescence de docs **dans ton repo GitHub** et lit/écrit
-   dedans. Chaque « Publier » = un commit `Easydoc: <auteur>` poussé.
+2. Dans ⚙️ Réglages : colle le jeton, indique le dépôt (`proprietaire/repo` ou l'URL),
+   laisse la branche vide (défaut) → **🔌 Tester la connexion**, puis **💾 Enregistrer**.
+3. Easydoc bascule **à chaud** (aucun redémarrage) : il crée alors l'arborescence de docs
+   **dans ce dépôt** (si vide) et lit/écrit dedans. Chaque « Publier » = un commit
+   `Easydoc: <auteur>` poussé. Le jeton reste **côté serveur** (`data/config.json`,
+   chmod 600) et n'est jamais renvoyé au navigateur.
+
+*(Le fichier `.env` ne sert plus qu'à préconfigurer au premier démarrage, avant toute
+sauvegarde de réglages depuis l'interface.)*
 
 ## 🤖 Intégration de Claude (le cœur de ta demande)
 

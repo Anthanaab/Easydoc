@@ -69,7 +69,7 @@ else
 fi
 
 # -- 3. Configuration locale ------------------------------------------------------------------------------
-[ -n "$TOKEN" ] || warn "EASYDOC_TOKEN absent : l'app démarrera mais la publication GitHub échouera."
+[ -n "$TOKEN" ] || warn "Aucun jeton fourni : Easydoc démarre en mode local — connecte ton dépôt GitHub depuis l'interface (⚙️ Réglages, aucune redémarrage nécessaire)."
 install -d -o root -g root -m 755 /opt
 cat > "$APP_DIR/.env" <<EOF
 # Fichier local au conteneur (jamais versionné).
