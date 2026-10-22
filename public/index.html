@@ -3,92 +3,93 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Easydoc — espace collaboratif de ton jeu</title>
-  <script type="importmap">
-  {
-    "imports": {
-      "yjs": "https://esm.sh/yjs@13.6.18",
-      "y-websocket": "https://esm.sh/y-websocket@2.0.4",
-      "marked": "https://esm.sh/marked@12.0.2",
-      "dompurify": "https://esm.sh/dompurify@3.1.6"
-    }
-  }
+  <meta name="color-scheme" content="light dark" />
+  <title>Easydoc</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M10 10h12M10 16h12M10 22h7' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <script>
+    // thème appliqué avant l'affichage (évite un flash)
+    (function () {
+      var t = localStorage.getItem("ed-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+    })();
   </script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">🎮 <b>Easydoc</b><span class="mode" id="mode">…</span></div>
-    <div class="actions">
-      <span class="conn" id="conn">⏳ connexion…</span>
-      <span class="users" id="users"></span>
-      <button id="btnPull" title="Récupère les dernières versions du dépôt (incl. les mises à jour écrites par l'agent IA / Claude)">⟳ Sync agent</button>
-      <button id="btnSave" title="Enregistrer et publier sur le dépôt (Ctrl+S)">💾 Publier</button>
-      <button id="btnPreview" title="Basculer l'aperçu Markdown">👁 Aperçu</button>
-      <button id="btnSettings" title="Connecter / changer de dépôt GitHub, ou passer en mode local">⚙️</button>
-    </div>
-  </header>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div class="brand-text">
+          <div class="brand-name">Easydoc</div>
+          <button class="workspace" id="workspace" title="Dépôt connecté — cliquer pour modifier">
+            <span data-icon="branch"></span><span id="workspaceLabel">…</span>
+          </button>
+        </div>
+      </div>
 
-  <main class="layout">
-    <aside class="sidebar">
-      <div class="side-head">
-        <span>📁 Dépôt</span>
-        <button id="btnNew" title="Nouveau document .md">+ ⤴ +</button>
+      <div class="side-tools">
+        <label class="search">
+          <span data-icon="search"></span>
+          <input id="search" type="search" placeholder="Rechercher" autocomplete="off" />
+          <kbd>Ctrl K</kbd>
+        </label>
+        <button class="btn btn-primary btn-block" id="btnNew"><span data-icon="plus"></span>Nouveau document</button>
       </div>
-      <div id="tree" class="tree"></div>
-      <div id="newbox" class="newbox hidden">
-        <input id="newpath" placeholder="docs/mon-idee.md" />
-        <button id="btnNewGo">Créer</button>
-      </div>
+
+      <nav class="tree" id="tree" aria-label="Documents"></nav>
+
       <div class="side-foot">
-        <a href="https://docs.github.com/fr/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank">🔑 Connecter ton GitHub</a>
+        <button class="me" id="btnMe" title="Changer mon nom">
+          <span class="avatar" id="meAvatar"></span><span class="me-name" id="meName"></span>
+        </button>
+        <div class="side-foot-actions">
+          <button class="icon-btn" id="btnTheme" title="Thème clair / sombre"><span data-icon="moon"></span></button>
+          <button class="icon-btn" id="btnSettings" title="Réglages du dépôt"><span data-icon="settings"></span></button>
+        </div>
       </div>
     </aside>
+    <div class="scrim" id="scrim"></div>
 
-    <section class="editor-wrap">
-      <div id="editor">
-        <textarea id="editor-ta" spellcheck="false"
-          placeholder="Ouvre un document dans le menu de gauche, ou clique sur + pour en créer un."></textarea>
-        <div id="caret-layer"></div>
-      </div>
-      <div id="preview" class="preview hidden"></div>
-    </section>
-  </main>
-
-  <div id="toast" class="toast hidden"></div>
-
-  <!-- Fenêtre de réglages : connecter un dépôt GitHub depuis l'interface -->
-  <div id="settingsModal" class="modal hidden">
-    <div class="modal-box">
-      <h3>⚙️ Dépôt connecté</h3>
-      <p class="set-cur" id="setCurrent">…</p>
-      <div class="radio-row">
-        <label><input type="radio" name="setmode" value="github" checked> <b>GitHub</b> (recommandé)</label>
-        <label><input type="radio" name="setmode" value="local"> <b>Local</b> (sans GitHub)</label>
-      </div>
-      <div id="ghFields">
-        <label for="setToken">Jeton GitHub <span class="muted">(scope <code>repo</code> — vide = conserver l'actuel)</span></label>
-        <input id="setToken" type="password" autocomplete="off" placeholder="ghp_… ou github_pat_…" />
-        <label for="setRepo">Dépôt <span class="muted">(proprietaire/repo, ou URL github.com/*)</span></label>
-        <input id="setRepo" placeholder="ex : Anthanaab/mon-jeu" />
-        <label for="setBranch">Branche <span class="muted">(vide = branche par défaut)</span></label>
-        <input id="setBranch" placeholder="main" />
-        <div class="btn-row">
-          <button id="btnTest">🔌 Tester la connexion</button>
-          <button id="btnSaveSettings" class="primary">💾 Enregistrer & reconnecter</button>
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="btnMenu" title="Documents"><span data-icon="menu"></span></button>
+        <div class="crumbs" id="crumbs"></div>
+        <div class="status" id="status"></div>
+        <div class="spacer"></div>
+        <div class="presence" id="presence"></div>
+        <div class="segmented" id="viewSwitch" role="tablist" aria-label="Affichage">
+          <button data-view="edit" title="Éditer"><span data-icon="pencil"></span><span class="lbl">Éditer</span></button>
+          <button data-view="split" title="Côte à côte"><span data-icon="columns"></span><span class="lbl">Côte à côte</span></button>
+          <button data-view="preview" title="Aperçu"><span data-icon="eye"></span><span class="lbl">Aperçu</span></button>
         </div>
-        <div id="setInfo" class="set-info"></div>
-      </div>
-      <div id="localFields" class="hidden">
-        <p>Mode local : les documents sont stockés dans un <b>dépôt git local</b> sur ce serveur
-        (aucun compte GitHub requis). Tu pourras connecter GitHub à tout moment ici.</p>
-        <div class="btn-row">
-          <button id="btnLocalSave" class="primary">💾 Passer en mode local</button>
+        <button class="icon-btn" id="btnSync" title="Récupérer les modifications du dépôt"><span data-icon="refresh"></span></button>
+        <button class="icon-btn" id="btnDelete" title="Supprimer ce document"><span data-icon="trash"></span></button>
+        <button class="btn btn-primary" id="btnSave" title="Enregistrer maintenant (Ctrl+S)"><span data-icon="check"></span><span class="lbl">Enregistrer</span></button>
+      </header>
+
+      <section class="area" id="area" data-view="edit" data-state="empty">
+        <div class="empty" id="empty">
+          <div class="empty-icon" data-icon="file"></div>
+          <h2>Aucun document ouvert</h2>
+          <p>Choisis un document dans la liste ou crées-en un nouveau.</p>
+          <button class="btn btn-primary" id="btnNewEmpty"><span data-icon="plus"></span>Nouveau document</button>
         </div>
-      </div>
-      <button id="btnCloseSettings" class="close">Fermer</button>
-    </div>
+        <div class="pane pane-editor" id="paneEditor">
+          <textarea id="editor" spellcheck="true" placeholder="Commence à écrire… (Markdown)" aria-label="Contenu du document"></textarea>
+        </div>
+        <div class="pane pane-preview" id="panePreview">
+          <article class="prose" id="preview"></article>
+        </div>
+      </section>
+    </main>
   </div>
+
+  <div class="modal hidden" id="modal" role="dialog" aria-modal="true">
+    <div class="modal-card" id="modalCard"></div>
+  </div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script type="module" src="app.js"></script>
 </body>

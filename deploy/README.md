@@ -1,62 +1,59 @@
-# 🐧 Déploiement en LXC (Proxmox VE) — automatisé
+# Déploiement sur Proxmox VE (conteneur LXC)
 
-Deux scripts, même logique que `Easy3D` :
+Deux scripts :
 
-| Script | Où il tourne | Rôle |
+| Script | Où | Rôle |
 |---|---|---|
-| `deploy/easydoc-lxc.sh` | **Hôte Proxmox** (root) | crée le conteneur (menus whiptail), le démarre, y déploie Easydoc |
-| `deploy/provision.sh` | **Dans le conteneur** | installe Node.js, clone le code, configure `.env`, crée le service systemd, vérifie la santé |
+| `easydoc-lxc.sh` | **hôte Proxmox** (root) | crée le conteneur (menus), l'installe, le met à jour, affiche son état, le supprime |
+| `provision.sh` | **dans le conteneur** (root) | installe Node.js, le code, les dépendances et le service systemd ; sert aussi aux mises à jour |
 
-## Prérequis (hôte Proxmox)
+Aucun jeton n'est demandé : une fois installé, ouvre l'adresse affichée et connecte ton dépôt
+GitHub depuis **Réglages** (en bas à gauche de l'interface).
 
-- Un nœud Proxmox VE 7/8/9 accessible en shell root.
-- Des stockages « rootdir » et « vztmpl » (presque toujours là).
+## Installer
 
-**Aucun jeton requis à l'installation** : Easydoc démarre en mode local, puis tu connectes
-n'importe quel dépôt GitHub **depuis l'interface** (bouton ⚙️ Réglages) — jeton, repo et
-branche s'y saisissent, avec un test de connexion avant enregistrement.
-
-## Utilisation (hôte Proxmox)
+Sur l'hôte Proxmox, en root :
 
 ```bash
-# 1. Récupérer le script (repo public, aucun jeton requis pour ça)
 curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/easydoc-lxc.sh -o easydoc-lxc.sh
-bash easydoc-lxc.sh                 # création guidée : mode « simple » ou « avancé »
+bash easydoc-lxc.sh
 ```
 
-Le mode **simple** : Debian 12, 2 cœurs, 2 Go, 8 Go, DHCP, non privilégié, démarrage auto.
-Le mode **avancé** : tu choisis tout (système Debian 12/13 ou Ubuntu 24.04, IP fixe, ressources,
-stockages, réseau…). Un récapitulatif est affiché avant toute création.
+- **Simple** : Debian 12, 2 cœurs, 1 Go de RAM, 8 Go de disque, DHCP, non privilégié, démarrage auto.
+- **Avancé** : système (Debian 12/13, Ubuntu 24.04), numéro, ressources, stockages, pont,
+  IP fixe, VLAN, mot de passe root.
 
-Le script : télécharge le template si absent → `pct create` → `pct start` → attend l'accès
-Internet → lance `provision.sh` (téléchargé depuis GitHub, donc toujours à jour) → vérifie que
-le service répond → affiche **l'URL finale** (`http://IP:3000`).
+Un récapitulatif est affiché avant toute création. À la fin, le script affiche l'adresse
+(`http://IP:3000`).
+
+## Gérer
 
 ```bash
-bash easydoc-lxc.sh status            # état + URL du service
-bash easydoc-lxc.sh update <ctid>     # mise à jour (git pull + npm + restart) — préserve ton jeton
-bash easydoc-lxc.sh destroy <ctid>    # supprime le conteneur (avec confirmation)
-
-EASYDOC_DRYRUN=1 bash easydoc-lxc.sh  # simulation : affiche les commandes sans rien créer
-EASYDOC_TOKEN=ghp_... bash easydoc-lxc.sh   # préconfigure le jeton dès l'installation (optionnel)
+bash easydoc-lxc.sh update     # met à jour : code, dépendances, redémarrage du service
+bash easydoc-lxc.sh status     # état du conteneur et adresse
+bash easydoc-lxc.sh destroy    # supprime le conteneur (confirmation demandée)
 ```
 
-## Ce que provision.sh fait dans le conteneur
+Le conteneur est retrouvé automatiquement ; s'il y en a plusieurs, indique son numéro :
+`bash easydoc-lxc.sh update 115`. La mise à jour conserve la configuration (dépôt connecté,
+jeton, documents du dépôt local).
 
-1. Installe **Node.js ≥ 18** (NodeSource, sinon paquet Debian/Ubuntu).
-2. Clone `Anthanaab/Easydoc` → `/opt/easydoc` (ou `git pull` si déjà présent).
-3. Écrit `/opt/easydoc/.env` (`PORT`, `GITHUB_TOKEN`, `GITHUB_REPO`, `GITHUB_BRANCH`), chmod 600.
-   → **le jeton reste dans le conteneur**, jamais dans le repo.
-4. `npm install` (production), utilisateur système `easydoc` (sans shell).
-5. Service **systemd `easydoc.service`** : redémarrage automatique (`Restart=on-failure`),
-   démarrage au boot, `NoNewPrivileges`/`PrivateTmp`.
-6. Health check `GET /api/health` avant de conclure.
+Options : `EASYDOC_DRYRUN=1` (simulation, rien n'est créé), `EASYDOC_PORT=8080` (autre port),
+`EASYDOC_DOCS_REPO=moi/docs EASYDOC_TOKEN=…` (préconfigurer un dépôt de documents).
 
-## Astuces
+## Ce que fait provision.sh
 
-- **Jeton / dépôt** : tout se connecte depuis l'interface (⚙️ Réglages) — test de connexion
-  intégré, bascule à chaud sans redémarrage, persisté dans `/opt/easydoc/data/config.json`
-  (lisible seulement par root ; modifiable aussi à la main, puis `systemctl restart easydoc`).
-- **Service** : `pct enter <ctid>` puis `systemctl status easydoc`, logs : `journalctl -u easydoc -f`.
-- **Mise à jour du code** : `bash easydoc-lxc.sh update <ctid>` (ou relancer `provision.sh`).
-- **Données** : tout est dans le repo GitHub connecté ; rien de critique sur le disque du conteneur.
+1. Installe Node.js ≥ 18 (NodeSource, sinon le paquet de la distribution).
+2. Récupère le code dans `/opt/easydoc` (clone, ou mise à jour forcée sur la branche : un fichier
+   modifié localement ne bloque plus la mise à jour).
+3. Crée `/opt/easydoc/.env` au premier passage uniquement ; `data/` (dépôt connecté, jeton,
+   dépôt local) n'est jamais touché.
+4. Installe les dépendances (`npm ci`), crée l'utilisateur système `easydoc`.
+5. Écrit le service `easydoc.service`, le **redémarre** et vérifie qu'il répond.
+
+## Dépannage
+
+- Journal : `pct exec <ctid> -- journalctl -u easydoc -n 50`
+- Console du conteneur : `pct enter <ctid>`
+- Pas d'Internet dans le conteneur : vérifier le pont réseau, la passerelle et le DNS.
+- Accès par nom de domaine / HTTPS : le proxy doit relayer le WebSocket (voir le README principal).

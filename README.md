@@ -1,114 +1,90 @@
-# 🎮 Easydoc — plateau collaboratif Markdown pour ton jeu
+# Easydoc
 
-Une plateforme **auto-hébergée**, faite sur mesure, pour éditer **en temps réel** les fichiers
-Markdown de ton projet, **synchronisés avec un dépôt GitHub** — et où un **agent IA (Claude)**
-peut lire, proposer et écrire les mêmes documents.
+Éditeur Markdown **collaboratif en temps réel**, auto-hébergé, dont les documents sont les
+fichiers d'un **dépôt GitHub** (ou d'un dépôt git local).
 
-Conçue pour développer un jeu en équipe : le repository GitHub est la **source de vérité**,
-tout le monde (humains + Claude) écrit dans les mêmes `.md`, et chacun voit les mises à jour
-de l'autre.
+Plusieurs personnes écrivent dans le même document en même temps ; chaque enregistrement
+devient un commit. Un agent IA (Claude, un script, un autre outil) peut travailler sur le même
+dépôt : ses modifications apparaissent en direct chez tout le monde, fusionnées avec ce qui est
+en train d'être tapé.
 
----
+## Fonctionnalités
 
-## ✨ Ce que ça fait
+- **Édition à plusieurs en temps réel** (CRDT Yjs) : aucune frappe perdue, le curseur reste en place.
+- **Présence** : qui est connecté, sur quel document, à quelle ligne.
+- **Enregistrement automatique** quelques secondes après la dernière frappe : un seul commit
+  pour tous les participants, avec leurs noms dans le message. `Ctrl+S` enregistre tout de suite.
+- **Modifications externes** (agent IA, `git push`, autre outil) détectées toutes les 20 s
+  et fusionnées en direct, sans écraser la saisie en cours.
+- Aperçu Markdown (édition / côte à côte / aperçu), liens entre documents, thème clair ou sombre.
+- Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
+- Dépôt GitHub **connecté depuis l'interface** (Réglages) : aucun jeton à l'installation.
+- Fonctionne aussi sans GitHub (dépôt git local) et sans Internet sur le réseau local.
 
-- 🕐 **Édition temps réel** : plusieurs personnes éditent le même document en même temps
-  (fusion sans perte via CRDT **Yjs**, like Google Docs).
-- 👥 **Présence + curseurs** : tu vois qui est connecté et où chacun tape (curseurs colorés).
-- 📝 **Éditeur Markdown** : saisie en Markdown + **aperçu rendu** en direct.
-- 🔗 **Synchronisation GitHub** : appliquer = `commit` + `push` sur ton dépôt ;
-  **« Sync agent »** récupère les mises à jour écrites par Claude.
-- 📂 **Arborescence du dépôt** : ouvre/édite/crée les documents `.md`, organisés par dossier
-  (design-doc, gameplay, roadmap, idées, canal Claude…).
-- 🖥️ **Auto-hébergé** : Docker ou `node server.js`, tes fichiers restent chez toi.
-- 💾 Sauvegarde auto (1,5 s après modification), **Ctrl+S** pour publier, undo/redo.
+## Démarrage rapide
 
-## 📁 Structure initiale (créée automatiquement)
-
-```
-docs/design-doc.md       vision globale du jeu
-docs/gameplay.md         systèmes de gameplay
-docs/roadmap.md          phases de développement
-ideas/idees.md           liste d'idées
-ideas/notes-claude.md    canal où Claude écrit ses notes/propositions
-```
-
-## 🚀 Démarrage rapide (mode local, zéro config)
-
-```
-cd Easydoc
+```bash
 npm install
-cp .env.example .env      # optionnel : renseigne GITHUB_TOKEN / GITHUB_REPO
-npm start                 # → http://localhost:3000
+npm start              # http://localhost:3000
 ```
 
-Sans token GitHub, ça tourne sur un **dépôt git local** (`data/localrepo`) : tout est
-auto-hébergé et testable immédiatement.
+Au premier lancement, Easydoc utilise un dépôt git local (`data/localrepo`) avec quelques
+documents de départ. Pour travailler sur GitHub : **Réglages** (en bas à gauche) → dépôt
+(`propriétaire/dépôt` ou URL) + jeton → **Tester** → **Connecter**. La bascule est immédiate.
 
-## 🔗 Connecter un dépôt GitHub — directement depuis l'interface
+Jeton : classique avec la permission `repo`, ou fin (*fine-grained*) avec **Contents :
+lecture et écriture** sur le dépôt. Il est stocké côté serveur dans `data/config.json`
+(droits 600) et n'est jamais renvoyé au navigateur.
 
-Pas besoin de configurer quoi que ce soit à l'installation : clique sur **⚙️ Réglages**
-dans l'interface et connecte **n'importe quel dépôt** (personnel, organisation…).
+## Travailler avec un agent IA
 
-1. Crée un **Personal Access Token** (classique, scope `repo`) :
-   https://github.com/settings/tokens
-2. Dans ⚙️ Réglages : colle le jeton, indique le dépôt (`proprietaire/repo` ou l'URL),
-   laisse la branche vide (défaut) → **🔌 Tester la connexion**, puis **💾 Enregistrer**.
-3. Easydoc bascule **à chaud** (aucun redémarrage) : il crée alors l'arborescence de docs
-   **dans ce dépôt** (si vide) et lit/écrit dedans. Chaque « Publier » = un commit
-   `Easydoc: <auteur>` poussé. Le jeton reste **côté serveur** (`data/config.json`,
-   chmod 600) et n'est jamais renvoyé au navigateur.
+Easydoc crée un fichier `CLAUDE.md` dans un dépôt vide : ce sont les consignes que Claude Code
+lit automatiquement. L'agent travaille sur un clone du même dépôt et pousse ses commits ;
+Easydoc les récupère et les affiche en direct (ou tout de suite avec le bouton *Récupérer les
+modifications*). En dépôt local, l'agent peut modifier directement les fichiers de `data/localrepo`.
 
-*(Le fichier `.env` ne sert plus qu'à préconfigurer au premier démarrage, avant toute
-sauvegarde de réglages depuis l'interface.)*
+## Déploiement
 
-## 🤖 Intégration de Claude (le cœur de ta demande)
+- **Proxmox (LXC)** — un script, aucun jeton demandé : voir [`deploy/README.md`](deploy/README.md).
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/easydoc-lxc.sh -o easydoc-lxc.sh
+  bash easydoc-lxc.sh
+  ```
+- **Docker** : `docker compose up -d` (données dans le volume `easydoc_data`).
+- **Derrière un reverse proxy** (nom de domaine, HTTPS) : le WebSocket doit être relayé, sinon
+  l'édition se fait sans temps réel. Exemple nginx :
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:3000;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+  }
+  ```
 
-- **Claude écrit** dans le même dépôt : clone-le sur une machine où tu lui donnes accès,
-  dis-lui de lire `ideas/*.md`, `docs/*.md`, de compléter/écrire. Il fait ses commits.
-- **Tu vois ses mises à jour** : ouvre le doc concerné (ou `ideas/notes-claude.md`) puis
-  clique **⟳ Sync agent**. Le serveur récupère ses derniers commits et injecte le contenu
-  en **temps réel** dans ton éditeur ouvert.
-- **Claude voit tes idées** : dès que tu publies, elles sont poussées dans le repo → Claude
-  les lit à son prochain `git pull`.
-- Tout est un **cycle unique repo GitHub** : pas de silo entre l'outil d'édition et l'IA.
+## Sécurité
 
-## 🐳 Docker
+Easydoc n'a **pas de comptes utilisateurs** : toute personne qui accède à l'adresse peut lire,
+modifier et changer le dépôt connecté. Réserve-le à ton réseau local / VPN, ou place-le derrière
+un proxy avec authentification. Les chemins de fichiers sont validés côté serveur (impossible de
+lire ou d'écrire en dehors du dépôt, ni les fichiers cachés comme `.git` ou `.env`).
 
-```
-docker compose up -d
-```
-Variables passées dans `docker-compose.yml` (GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH).
-Les données auto-hébergées sont dans le volume `easydoc_data`.
+## Configuration (variables d'environnement, toutes facultatives)
 
-## 🐧 Déploiement LXC (Proxmox) — un seul script
-
-```
-curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/easydoc-lxc.sh -o easydoc-lxc.sh
-bash easydoc-lxc.sh        # → conteneur prêt, service auto, URL affichée (http://IP:3000)
-```
-
-Création complète du conteneur (menus), déploiement du code, configuration du jeton, service
-systemd et health check, avec mise à jour / suppression automatiques.
-Détails : [`deploy/README.md`](deploy/README.md).
-
-## ⚙️ Configuration
-
-| Variable | Défaut | Description |
+| Variable | Défaut | Rôle |
 |---|---|---|
-| `PORT` | `3000` | Port HTTP de l'interface |
-| `GITHUB_TOKEN` | *(vide)* | Token GitHub (scope repo) |
-| `GITHUB_REPO` | *(vide)* | Format `proprietaire/repo` |
-| `GITHUB_BRANCH` | `main` | Branche de travail |
-| `LOCAL_REPO_DIR` | `./data/localrepo` | Dépôt local (si pas de token) |
+| `PORT` | `3000` | Port HTTP |
+| `DATA_DIR` | `./data` | Configuration (`config.json`) et dépôt local |
+| `LOCAL_REPO_DIR` | `$DATA_DIR/localrepo` | Dépôt git local (mode sans GitHub) |
+| `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
+| `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
+| `GITHUB_TOKEN`, `GITHUB_REPO`, `GITHUB_BRANCH` | — | Préconfiguration, utilisée tant qu'aucun réglage n'a été enregistré depuis l'interface |
 
-## 🧪 Tests (temps réel vérifié)
+## Développement
 
-Le cœur "temps réel + fusion" a été validé avec deux clients connectés sur le même doc :
-chargement initial du dépôt, écritures croisées visibles en direct, fusion d'éditions
-simultanées sans perte, persistance après redémarrage. (Exécutable via un client Yjs / WS.)
-
-## 📦 Stack
-
-Node.js · Express · **Yjs** (CRDT temps réel via WebSocket) · @octokit/rest (GitHub) ·
-simple-git (mode local) · marked + DOMPurify (aperçu) · import-map CDN côté client.
+- `server.js` — serveur HTTP + WebSocket, enregistrement, fusion des modifications externes
+- `src/repo.js` — accès au dépôt (API GitHub ou git local) · `src/paths.js` — validation des chemins
+- `public/` — interface (HTML/CSS/JS sans framework)
+- `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
+  DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.

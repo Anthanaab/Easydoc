@@ -1,34 +1,28 @@
 #!/usr/bin/env bash
-# Easydoc — provisioning d'un conteneur LXC Debian 12+/Ubuntu 24.04 (ou n'importe quel hôte-propre).
-# À exécuter en root DANS le conteneur. Utilisé automatiquement par deploy/easydoc-lxc.sh,
-# mais peut aussi être lancé à la main.
+# Easydoc — installation / mise à jour dans un conteneur LXC (Debian 12+, Ubuntu 24.04) ou une VM.
+# À exécuter en root DANS le conteneur. Lancé automatiquement par deploy/easydoc-lxc.sh,
+# peut aussi être lancé à la main :
 #
-#   export EASYDOC_TOKEN=ghp_...        # obligatoire (l'app écrit sur GitHub)
-#   export EASYDOC_REPO=Anthanaab/Easydoc
-#   export EASYDOC_BRANCH=main
-#   export EASYDOC_PORT=3000
-#   curl -fsSL "https://raw.githubusercontent.com/\$EASYDOC_REPO/\$EASYDOC_BRANCH/deploy/provision.sh" | bash
+#   curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/provision.sh | bash
 #
-# Ré-exécutable : met à jour le code (git pull) et relance le service.
+# Aucun jeton n'est nécessaire : le dépôt de documents se connecte ensuite depuis l'interface
+# (Réglages). Variables facultatives :
+#   EASYDOC_PORT=3000                       port HTTP (défaut 3000)
+#   EASYDOC_DOCS_REPO=moi/docs EASYDOC_TOKEN=ghp_…   préconfigurer le dépôt de documents
+#   EASYDOC_REPO / EASYDOC_BRANCH           dépôt et branche du CODE d'Easydoc (défaut Anthanaab/Easydoc, main)
+#
+# Ré-exécutable : met le code à jour, réinstalle les dépendances et redémarre le service.
+# La configuration (.env, data/ : dépôt connecté, jeton, documents locaux) est conservée.
 set -Eeuo pipefail
 
-REPO="${EASYDOC_REPO:-Anthanaab/Easydoc}"
-BRANCH="${EASYDOC_BRANCH:-main}"
-PORT="${EASYDOC_PORT:-3000}"
-TOKEN="${EASYDOC_TOKEN:-}"
+SRC_REPO="${EASYDOC_REPO:-Anthanaab/Easydoc}"
+SRC_BRANCH="${EASYDOC_BRANCH:-main}"
 APP_DIR=/opt/easydoc
+APP_USER=easydoc
 SERVICE=easydoc.service
-PROVISION_VERSION=3   # marqueur vérifié par easydoc-lxc.sh (le CDN peut servir une version périmée)
+PROVISION_VERSION=4   # marqueur vérifié par easydoc-lxc.sh (le CDN peut servir une version périmée)
 
-# Mise à jour : préserve la configuration existante si aucune variable n'est fournie.
-if [ -f "$APP_DIR/.env" ]; then
-  [ -n "$TOKEN" ] || TOKEN="$(sed -n 's/^GITHUB_TOKEN=//p' "$APP_DIR/.env" | head -1)"
-  [ -n "${EASYDOC_REPO:-}" ] || REPO="$(sed -n 's/^GITHUB_REPO=//p' "$APP_DIR/.env" | head -1)"
-  [ -n "${EASYDOC_BRANCH:-}" ] || BRANCH="$(sed -n 's/^GITHUB_BRANCH=//p' "$APP_DIR/.env" | head -1)"
-  [ -n "${EASYDOC_PORT:-}" ] || PORT="$(sed -n 's/^PORT=//p' "$APP_DIR/.env" | head -1)"
-fi
-
-G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; N=$'\e[0m'
+if [ -t 1 ]; then G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; N=$'\e[0m'; else G= Y= R= B= N=; fi
 info() { echo "${B}==>${N} $*"; }
 ok()   { echo " ${G}✓${N} $*"; }
 warn() { echo " ${Y}!${N} $*"; }
@@ -38,79 +32,94 @@ trap 'echo; die "Erreur ligne $LINENO : $BASH_COMMAND"' ERR
 [ "$(id -u)" -eq 0 ] || die "Lancez ce script en root dans le conteneur."
 export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-# -- 1. Node.js (>= 18) ---------------------------------------------------------------------------------
-info "Paquets de base + Node.js"
+# -- 1. Paquets + Node.js (>= 18) ------------------------------------------------------------------
+info "Paquets de base et Node.js"
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates gnupg git >/dev/null
-
-if command -v node >/dev/null && [ "$(node -v | cut -d. -f1 | tr -d v)" -ge 18 ]; then
-  ok "Node.js déjà présent ($(node -v))"
+node_ok() { command -v node >/dev/null && [ "$(node -v | cut -d. -f1 | tr -d v)" -ge 18 ]; }
+if node_ok; then
+  ok "Node.js $(node -v) déjà présent"
 else
   if curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/node-setup.sh 2>/dev/null && bash /tmp/node-setup.sh >/dev/null 2>&1; then
     apt-get install -y -qq nodejs >/dev/null
   else
-    warn "NodeSource indisponible pour cette distribution, paquet système utilisé"
+    warn "Dépôt NodeSource indisponible pour ce système : paquet de la distribution utilisé"
     apt-get install -y -qq nodejs npm >/dev/null
   fi
-  command -v node >/dev/null && [ "$(node -v | cut -d. -f1 | tr -d v)" -ge 18 ] \
-    || die "Node.js introuvable (>= 18 requis)"
+  node_ok || die "Node.js 18 ou plus récent est requis."
   ok "Node.js $(node -v)"
 fi
 
-# -- 2. Code source --------------------------------------------------------------------------------------
-# Le dépôt appartient à l'utilisateur applicatif (chown ci-dessous) : autoriser git
-# à le relire quand on relance le provisionnement en root (dubious ownership).
+# -- 2. Code source ---------------------------------------------------------------------------------
+# Le dossier appartient à l'utilisateur du service : autoriser git (root) à le manipuler.
 git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
-info "Code source : $REPO ($BRANCH) → $APP_DIR"
+info "Code : $SRC_REPO ($SRC_BRANCH) → $APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" fetch --quiet origin
-  git -C "$APP_DIR" checkout --quiet "$BRANCH" 2>/dev/null || true
-  git -C "$APP_DIR" pull --quiet --ff-only origin "$BRANCH" || warn "pull : modifications locales non suivies, on continue"
+  git -C "$APP_DIR" remote set-url origin "https://github.com/$SRC_REPO.git"
+  git -C "$APP_DIR" fetch --quiet origin "$SRC_BRANCH" || die "Impossible de récupérer le code (réseau ?)."
+  # reset et non pull : un fichier suivi modifié localement (package-lock…) ne bloque plus la mise à jour.
+  # .env, data/ et node_modules/ ne sont pas suivis par git : ils sont conservés.
+  git -C "$APP_DIR" reset --hard --quiet "origin/$SRC_BRANCH"
 else
-  rm -rf "$APP_DIR"
-  git clone --quiet --branch "$BRANCH" "https://github.com/$REPO.git" "$APP_DIR" \
-    || die "Clonage impossible (repo inaccessible ?)"
+  [ -e "$APP_DIR" ] && mv "$APP_DIR" "$APP_DIR.bak.$(date +%s)"
+  git clone --quiet --branch "$SRC_BRANCH" "https://github.com/$SRC_REPO.git" "$APP_DIR" || die "Clonage impossible."
 fi
+ok "Version $(git -C "$APP_DIR" log -1 --format='%h — %s' | cut -c1-80)"
 
-# -- 3. Configuration locale ------------------------------------------------------------------------------
-[ -n "$TOKEN" ] || warn "Aucun jeton fourni : Easydoc démarre en mode local — connecte ton dépôt GitHub depuis l'interface (⚙️ Réglages, aucune redémarrage nécessaire)."
-install -d -o root -g root -m 755 /opt
-cat > "$APP_DIR/.env" <<EOF
-# Fichier local au conteneur (jamais versionné).
-PORT=$PORT
-GITHUB_TOKEN=$TOKEN
-GITHUB_REPO=$REPO
-GITHUB_BRANCH=$BRANCH
-EOF
-chown root:root "$APP_DIR/.env" && chmod 600 "$APP_DIR/.env"
+# -- 3. Configuration (créée une fois, puis conservée) ------------------------------------------------
+ENV_FILE="$APP_DIR/.env"
+set_env() {  # set_env CLÉ VALEUR : remplace ou ajoute la ligne
+  if grep -q "^$1=" "$ENV_FILE" 2>/dev/null; then sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"; else echo "$1=$2" >> "$ENV_FILE"; fi
+}
+if [ ! -f "$ENV_FILE" ]; then
+  printf '# Configuration locale d'"'"'Easydoc (jamais versionnée).\n# Le dépôt de documents se règle dans l'"'"'interface (Réglages) : data/config.json.\n' > "$ENV_FILE"
+  set_env PORT "${EASYDOC_PORT:-3000}"
+else
+  [ -n "${EASYDOC_PORT:-}" ] && set_env PORT "$EASYDOC_PORT"
+fi
+if [ -n "${EASYDOC_DOCS_REPO:-}" ] && [ -n "${EASYDOC_TOKEN:-}" ]; then
+  set_env GITHUB_REPO "$EASYDOC_DOCS_REPO"
+  set_env GITHUB_TOKEN "$EASYDOC_TOKEN"
+  ok "Dépôt de documents préconfiguré : $EASYDOC_DOCS_REPO"
+fi
+PORT="$(sed -n 's/^PORT=//p' "$ENV_FILE" | head -1)"; PORT="${PORT:-3000}"
+mkdir -p "$APP_DIR/data"
 
-# -- 4. Dépendances --------------------------------------------------------------------------------------
-info "Dépendances (npm install)"
+# -- 4. Dépendances ---------------------------------------------------------------------------------
+info "Dépendances"
 cd "$APP_DIR"
-npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || npm install --omit=dev || die "npm install a échoué"
-
-# -- 5. Utilisateur système + droits ---------------------------------------------------------------------
-if ! id -u easydoc >/dev/null 2>&1; then
-  useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin easydoc
+if [ -f package-lock.json ]; then
+  npm ci --omit=dev --no-audit --no-fund >/dev/null 2>&1 || npm ci --omit=dev --no-audit --no-fund || die "npm ci a échoué."
+else
+  npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || die "npm install a échoué."
 fi
-chown -R easydoc:easydoc "$APP_DIR"
+ok "Dépendances installées"
 
-# -- 6. Service systemd ----------------------------------------------------------------------------------
-install -d -o root -g root -m 755 /etc/systemd/system
-cat > /etc/systemd/system/$SERVICE <<UNIT
+# -- 5. Utilisateur du service + droits ---------------------------------------------------------------
+id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+chmod 600 "$ENV_FILE"
+chmod 700 "$APP_DIR/data"
+
+# -- 6. Service systemd ------------------------------------------------------------------------------
+cat > "/etc/systemd/system/$SERVICE" <<UNIT
 [Unit]
-Description=Easydoc — plateau collaboratif Markdown temps réel (Yjs + GitHub)
+Description=Easydoc — éditeur Markdown collaboratif
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=easydoc
-Group=easydoc
+User=$APP_USER
+Group=$APP_USER
 WorkingDirectory=$APP_DIR
+Environment=NODE_ENV=production
 ExecStart=$(command -v node) server.js
 Restart=on-failure
 RestartSec=3
+# arrêt propre : les documents ouverts sont enregistrés avant l'extinction
+KillSignal=SIGTERM
+TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -118,21 +127,29 @@ PrivateTmp=true
 WantedBy=multi-user.target
 UNIT
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   systemctl daemon-reload
-  systemctl enable --now $SERVICE >/dev/null 2>&1 || systemctl restart $SERVICE
-  info "Attente du démarrage (health check)"
-  okc=0
+  systemctl enable "$SERVICE" >/dev/null 2>&1
+  systemctl restart "$SERVICE"   # restart (et non enable --now) : charge bien le nouveau code
+  info "Vérification du service"
+  HEALTH=""
   for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then okc=1; break; fi
+    HEALTH="$(curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
+    [ -n "$HEALTH" ] && break
     sleep 1
   done
-  [ "$okc" = 1 ] || { systemctl status $SERVICE --no-pager 2>&1 | tail -8 || true; die "Le service ne répond pas sur le port $PORT."; }
-  ok "Service $SERVICE actif, santé OK sur le port $PORT"
+  if [ -z "$HEALTH" ]; then
+    journalctl -u "$SERVICE" -n 15 --no-pager 2>/dev/null || true
+    die "Le service ne répond pas sur le port $PORT."
+  fi
+  VER="$(echo "$HEALTH" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+  ok "Service actif — Easydoc ${VER:-?}"
 else
-  warn "systemd indisponible ici — démarrage manuel : node $APP_DIR/server.js"
+  warn "systemd absent : démarrage manuel avec  cd $APP_DIR && sudo -u $APP_USER node server.js"
 fi
 
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo
-ok "${B}Easydoc est prêt : http://$(hostname -I 2>/dev/null | awk '{print $1}')${N}:$PORT (ou :3000 si le champ IP est vide)"
-echo "   Journal : journalctl -u $SERVICE -f —  Mise à jour : relancer ce script."
+ok "${B}Easydoc est prêt : http://${IP:-<adresse-du-conteneur>}:$PORT${N}"
+echo "   Connecte ton dépôt GitHub depuis l'interface : Réglages (en bas à gauche)."
+echo "   Journal : journalctl -u easydoc -f   ·   Mise à jour : relancer ce script."

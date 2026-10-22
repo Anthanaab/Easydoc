@@ -6,15 +6,10 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      PORT: "3000"
-      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
-      GITHUB_REPO: "${GITHUB_REPO:-}"
-      GITHUB_BRANCH: "${GITHUB_BRANCH:-main}"
-      LOCAL_REPO_DIR: "/app/data/localrepo"
+    # Le dépôt GitHub se connecte depuis l'interface (Réglages) ; rien à configurer ici.
     volumes:
-      # Données auto-hébergées (mode local / base de documents) persistées
       - easydoc_data:/app/data
+    stop_grace_period: 20s
 
 volumes:
   easydoc_data:
