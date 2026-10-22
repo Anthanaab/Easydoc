@@ -57,6 +57,9 @@ else
 fi
 
 # -- 2. Code source --------------------------------------------------------------------------------------
+# Le dépôt appartient à l'utilisateur applicatif (chown ci-dessous) : autoriser git
+# à le relire quand on relance le provisionnement en root (dubious ownership).
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 info "Code source : $REPO ($BRANCH) → $APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" fetch --quiet origin
