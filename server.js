@@ -26,6 +26,8 @@ const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths")
 const convert = require("./src/convert");
 const auth = require("./src/auth");
 const authorship = require("./src/authorship");
+const { TunnelManager } = require("./src/tunnel");
+const { Updater } = require("./src/updater");
 const pkg = require("./package.json");
 
 const ENV_FILE = process.env.ENV_FILE || path.join(__dirname, ".env");
@@ -83,7 +85,18 @@ function userFromReq(req) {
   if (!u || u.disabled || (u.epoch || 1) !== s.epoch) { sessions.destroy(token); return null; }
   return u;
 }
-const isHttps = (req) => req.socket.encrypted || (TRUST_PROXY > 0 && String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https");
+// ---- Tunnel Cloudflare et proxys de confiance ------------------------------------------------------
+const tunnel = new TunnelManager({ dataDir: DATA_DIR, port: PORT });
+const isLoopback = (a) => /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/.test(String(a || ""));
+/**
+ * Adresse « de confiance » pour lire X-Forwarded-For / -Proto : les TRUST_PROXY premiers proxys,
+ * et cloudflared quand le tunnel est actif (il tourne sur cette machine : connexion locale).
+ */
+function trustProxy(addr, i) {
+  if (TRUST_PROXY > 0 && i < TRUST_PROXY) return true;
+  return i === 0 && tunnel.enabled && isLoopback(addr);
+}
+const isHttps = (req) => req.socket.encrypted || (trustProxy(req.socket.remoteAddress, 0) && String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https");
 function setSessionCookie(req, res, token) {
   const maxAge = Math.floor(auth.SESSION_TTL_MS / 1000);
   res.setHeader("Set-Cookie", `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isHttps(req) ? "; Secure" : ""}`);
@@ -98,7 +111,9 @@ function sameOrigin(req) {
   let host;
   try { host = new URL(o).host; } catch (_e) { return false; }
   const fwd = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
-  return host === req.headers.host || (fwd && host === fwd);
+  if (host === req.headers.host || (fwd && host === fwd)) return true;
+  // requête arrivée par le tunnel sous l'un de ses noms publics
+  return trustProxy(req.socket.remoteAddress, 0) && tunnel.hostnames.includes(host.replace(/:443$/, ""));
 }
 
 // ---- Auteurs (qui a écrit quoi) ----------------------------------------------------------------
@@ -495,7 +510,7 @@ const encSeg = (s) => encodeURIComponent(s).replace(/\(/g, "%28").replace(/\)/g,
 // ---- API HTTP ------------------------------------------------------------------------------------
 const app = express();
 app.disable("x-powered-by");
-app.set("trust proxy", TRUST_PROXY);
+app.set("trust proxy", trustProxy);
 
 // En-têtes de sécurité : pas d'affichage dans la page d'un autre site (clickjacking), scripts
 // limités à ceux d'Easydoc (le petit script de thème en ligne est autorisé par son empreinte).
@@ -533,7 +548,8 @@ const bad = (res, code, error) => {
   return res.status(code).json({ ok: false, error });
 };
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, mode: repo.mode, version: pkg.version }));
+const BOOT_ID = require("crypto").randomBytes(6).toString("hex"); // change à chaque démarrage
+app.get("/api/health", (_req, res) => res.json({ ok: true, mode: repo.mode, version: pkg.version, boot: BOOT_ID }));
 
 // Authentification : toute l'API exige une session, sauf ces routes.
 const PUBLIC_API = new Set(["/api/health", "/api/auth/state", "/api/auth/login", "/api/auth/setup"]);
@@ -557,7 +573,7 @@ const errStatus = (e, fallback = 400) => (e && e.status) || fallback;
 
 // ---- Comptes ------------------------------------------------------------------------------------
 const loginFails = new Map(); // ip → { n, until }
-const clientIp = (req) => (TRUST_PROXY ? req.ip : req.socket.remoteAddress) || "?";
+const clientIp = (req) => req.ip || req.socket.remoteAddress || "?";
 function tooManyFails(ip) { const a = loginFails.get(ip); return !!(a && a.until > Date.now() && a.n >= 8); }
 function noteFail(ip) {
   let a = loginFails.get(ip);
@@ -680,7 +696,38 @@ app.put("/api/admin/access", adminOnly, (req, res) => {
   } catch (e) { bad(res, 400, e.message); }
 });
 
+// ---- Tunnel Cloudflare (administrateurs) --------------------------------------------------------------
+app.get("/api/admin/tunnel", adminOnly, (_req, res) => res.json({ ok: true, tunnel: tunnel.publicState() }));
+app.post("/api/admin/tunnel", adminOnly, async (req, res) => {
+  try {
+    const st = await tunnel.configure({ token: req.body.token, enabled: req.body.enabled });
+    console.log(`[tunnel] ${st.enabled ? "activé" : "désactivé"} par ${req.user.username}`);
+    res.json({ ok: true, tunnel: st });
+  } catch (e) { bad(res, 400, e.message); }
+});
+app.delete("/api/admin/tunnel", adminOnly, async (req, res) => {
+  const st = await tunnel.forget();
+  console.log(`[tunnel] jeton effacé par ${req.user.username}`);
+  res.json({ ok: true, tunnel: st });
+});
+
+// ---- Mise à jour d'Easydoc (administrateurs) ------------------------------------------------------------
+app.get("/api/admin/update", adminOnly, async (req, res) => {
+  try {
+    if (req.query.refresh === "1" || !updater.check) await updater.checkNow();
+    res.json({ ok: true, ...updater.status() });
+  } catch (e) { bad(res, 500, e.message); }
+});
+app.post("/api/admin/update", adminOnly, (req, res) => {
+  try {
+    const job = updater.start();
+    console.log(`[mise à jour] lancée par ${req.user.username}`);
+    res.json({ ok: true, job });
+  } catch (e) { bad(res, 409, e.message); }
+});
+
 app.get("/api/config", (_req, res) => res.json({
+  boot: BOOT_ID,
   mode: repo.mode,
   repo: repo.mode === "github" ? repo.options.githubRepo : null,
   branch: repo.mode === "github" ? repo.options.githubBranch : null,
@@ -1044,11 +1091,33 @@ wss.on("connection", (conn, req) => {
   yws.setupWSConnection(conn, req, { gc: true, docName: name });
 });
 
-async function shutdown(sig) {
-  console.log(`${sig} reçu : enregistrement des documents ouverts…`);
+/** Avant de quitter : enregistre les documents ouverts, les sessions, arrête le tunnel. */
+async function beforeExit() {
   try { await Promise.race([flushAll(), new Promise((r) => setTimeout(r, 8000))]); } catch (_e) {}
   sessions.flush();
+  try { await tunnel.stop(true); } catch (_e) {}
+}
+async function shutdown(sig) {
+  console.log(`${sig} reçu : enregistrement des documents ouverts…`);
+  await beforeExit();
   process.exit(0);
+}
+
+const updater = new Updater({
+  appDir: __dirname, dataDir: DATA_DIR, currentVersion: pkg.version,
+  beforeRestart: async () => { console.log("[mise à jour] redémarrage sur la nouvelle version…"); await beforeExit(); },
+  onEvent: (ev) => {
+    if (ev.type === "restarting") bump("restartAt"); // les navigateurs affichent « mise à jour en cours »
+    if (ev.type === "done") console.log(`[mise à jour] ${ev.job.ok ? (ev.job.upToDate ? "déjà à jour" : "terminée") : `échec : ${ev.job.error}${ev.job.rolledBack ? " (version précédente remise)" : ""}`}`);
+  },
+});
+if (updater.last && updater.last.ok === true && Date.now() - updater.last.at < 120000) {
+  console.log(`[mise à jour] Easydoc ${updater.last.fromVersion} → ${updater.last.toVersion}`);
+}
+// vérification automatique de nouvelle version (affichée aux administrateurs)
+if (updater.availability().ok) {
+  setTimeout(() => updater.checkNow().catch(() => {}), 30000).unref();
+  setInterval(() => updater.checkNow().catch(() => {}), 6 * 3600 * 1000).unref();
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
@@ -1061,6 +1130,7 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`Easydoc ${pkg.version} — http://localhost:${PORT} — ${repo.mode === "github"
       ? `GitHub ${repo.options.githubRepo} (${repo.options.githubBranch})` : `local ${LOCAL_DIR}`}`);
+    if (tunnel.enabled) tunnel.start().catch((e) => console.error("[tunnel]", e.message));
   });
 }
 

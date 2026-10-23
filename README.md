@@ -88,6 +88,40 @@ modifications*). En dépôt local, l'agent peut modifier directement les fichier
   visiteur (sinon tout le monde aurait celle du proxy) et le cookie de session passe en `Secure`.
   Ne l'active **que** derrière un proxy : sans proxy, n'importe qui pourrait falsifier son adresse.
 
+## Accès depuis Internet (tunnel Cloudflare)
+
+Easydoc intègre un tunnel Cloudflare : accès en **HTTPS** depuis n'importe où, sans ouvrir de
+port sur ta box ni installer de proxy.
+
+1. Sur [one.dash.cloudflare.com](https://one.dash.cloudflare.com/) : **Networks → Tunnels →
+   Create a tunnel**, type *Cloudflared*.
+2. Copie la commande d'installation affichée (elle contient le jeton `eyJ…`) et colle-la dans
+   **Administration → Accès Internet** → **Activer le tunnel**. Rien d'autre à installer :
+   Easydoc télécharge `cloudflared` depuis les publications officielles de Cloudflare (empreinte
+   SHA-256 vérifiée), le lance et le relance s'il s'arrête, y compris après une mise à jour.
+3. Onglet **Public Hostname** du tunnel : ton nom de domaine, type *HTTP*, URL `localhost:3000`.
+   L'adresse publique s'affiche dans Easydoc (et une erreur si l'URL locale est incorrecte).
+
+Le jeton reste sur le serveur (`data/tunnel.json`, droits 600), n'est jamais réaffiché et est
+transmis à `cloudflared` par variable d'environnement (invisible dans la liste des processus).
+Les visiteurs passant par le tunnel sont identifiés par leur adresse réelle (anti-force brute)
+et leur cookie de session est marqué `Secure`. Crée tous les comptes, avec des mots de passe
+solides, avant d'ouvrir l'accès ; pour plus de sûreté, ajoute une règle *Cloudflare Access*
+(code par e-mail) devant Easydoc.
+
+## Mise à jour depuis l'interface
+
+**Administration → Mise à jour** : Easydoc vérifie s'il existe une nouvelle version (une pastille
+apparaît sur le bouton Administration), affiche la liste des changements et s'installe en un clic :
+récupération du code, bibliothèques si elles ont changé, **essai de la nouvelle version** sur un
+port et des données temporaires, puis redémarrage (≈ 30 s). Les documents ouverts sont enregistrés
+avant le redémarrage, les participants sont reconnectés et la page se recharge toute seule. Si
+l'essai échoue, l'ancienne version est remise en place sans interruption.
+
+Disponible pour l'installation Proxmox (clone git lancé par systemd). Le script Proxmox reste
+nécessaire quand une version demande un Node.js plus récent (Easydoc le signale) ; avec Docker,
+reconstruis l'image.
+
 ## Qui a écrit quoi
 
 - Chaque caractère tapé dans Easydoc est attribué **par le serveur** au compte connecté (impossible
@@ -161,7 +195,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 | `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
 | `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
 | `MAX_UPLOAD_MB` | `25` | Taille maximale d'un fichier importé |
-| `TRUST_PROXY` | `0` | Nombre de reverse proxys de confiance devant Easydoc (`1` derrière nginx, Caddy, Cloudflare Tunnel…) |
+| `TRUST_PROXY` | `0` (`cloudflared` local toujours reconnu quand le tunnel est actif) | Nombre de reverse proxys de confiance devant Easydoc (`1` derrière nginx, Caddy, Cloudflare Tunnel…) |
 | `GITHUB_TOKEN`, `GITHUB_REPO`, `GITHUB_BRANCH` | — | Préconfiguration, utilisée tant qu'aucun réglage n'a été enregistré depuis l'interface |
 
 ## Développement
@@ -171,6 +205,8 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `src/convert.js` — aperçu et conversion des fichiers Word et PDF
 - `src/auth.js` — comptes, sessions, droits d'accès · `cli.js` — administration en ligne de commande
 - `src/authorship.js` — attribution des auteurs (marquage Yjs, diff, blame, fichiers annexes)
+- `src/tunnel.js` — tunnel Cloudflare (téléchargement vérifié de cloudflared, supervision, journaux)
+- `src/updater.js` — mise à jour depuis l'interface (essai de la nouvelle version, retour arrière)
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
   DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.

@@ -29,12 +29,16 @@ Un récapitulatif est affiché avant toute création. À la fin, le script affic
 ## Gérer
 
 ```bash
-bash easydoc-lxc.sh update     # met à jour : code, dépendances, redémarrage du service
+bash easydoc-lxc.sh update     # met à jour : code, dépendances, Node.js, redémarrage du service
 bash easydoc-lxc.sh status     # état du conteneur et adresse
 bash easydoc-lxc.sh destroy    # supprime le conteneur (confirmation demandée)
 bash easydoc-lxc.sh users      # liste des comptes Easydoc
 bash easydoc-lxc.sh reset-password camille   # mot de passe oublié : en affiche un nouveau
 ```
+
+**Au quotidien, mets à jour depuis l'interface** (Administration → Mise à jour). Le script
+`update` reste utile si l'interface le demande (nouvelle version de Node.js) ou si Easydoc ne
+démarre plus.
 
 **Premier accès** : la première personne qui ouvre l'adresse crée le compte administrateur.
 Fais-le juste après l'installation (ou la mise à jour vers la 0.4).

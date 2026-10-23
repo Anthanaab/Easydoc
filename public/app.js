@@ -53,6 +53,7 @@ const ICONS = {
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
   unlink: '<path d="m18.84 12.25 1.72-1.71a4.95 4.95 0 0 0-7-7l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a4.95 4.95 0 0 0 7 7l1.71-1.71"/><path d="M8 2v3"/><path d="M2 8h3"/><path d="M16 22v-3"/><path d="M22 16h-3"/>',
   lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -278,12 +279,14 @@ function connectSystem() {
   sysMap = sysDoc.getMap("sys");
   sys.awareness.setLocalStateField("user", { name: me.name, color: me.color });
   sys.on("sync", (ok) => {
-    if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion") };
+    if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion"), restart: sysMap.get("restartAt") };
   });
   sys.on("connection-close", (ev) => { if (ev && ev.code === 4001) sessionLost(); });
   sysMap.observe(() => {
     if (!seenVersions) return;
     const cfg = sysMap.get("configVersion"), tree = sysMap.get("treeVersion");
+    const rs = sysMap.get("restartAt");
+    if (rs !== undefined && rs !== seenVersions.restart) { seenVersions.restart = rs; waitForNewVersion(); return; }
     if (cfg !== undefined && cfg !== seenVersions.config) { toast("Le dépôt connecté a changé — rechargement…"); setTimeout(() => location.reload(), 800); return; }
     if (tree !== seenVersions.tree) { seenVersions.tree = tree; refreshTree(); if (isAdmin()) loadRules(); }
   });
@@ -1322,7 +1325,7 @@ function genPassword() {
 }
 
 function openAdmin(tab = "users", opts = {}) {
-  const tabs = [["users", "Utilisateurs", "users"], ["access", "Droits d'accès", "lock"], ["repo", "Dépôt", "branch"]];
+  const tabs = [["users", "Utilisateurs", "users"], ["access", "Droits d'accès", "lock"], ["repo", "Dépôt", "branch"], ["internet", "Accès Internet", "globe"], ["update", "Mise à jour", "download"]];
   openModal({
     title: "Administration",
     wide: true,
@@ -1334,10 +1337,12 @@ function openAdmin(tab = "users", opts = {}) {
         const box = $("#tabBody", card);
         box.dataset.tab = k;
         box.innerHTML = '<div class="loadingview">Chargement…</div>';
-        const render = k === "users" ? renderUsersTab : k === "access" ? renderAccessTab : renderRepoTab;
+        const render = { users: renderUsersTab, access: renderAccessTab, repo: renderRepoTab, internet: renderInternetTab, update: renderUpdateTab }[k];
         render(box, o).catch((e) => { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
       };
       for (const b of $$(".tabs button", card)) b.onclick = () => show(b.dataset.tab);
+      const ub = $('.tabs [data-tab="update"]', card);
+      if (ub && updateInfo && updateInfo.check && updateInfo.check.available) ub.classList.add("has-badge");
       show(tab, opts);
     },
   });
@@ -1531,6 +1536,167 @@ async function renderAccessTab(box, opts = {}) {
   api("GET", `/api/admin/access/effective?path=${encodeURIComponent(target)}`).then((r) => renderEffective(r.users)).catch(() => {});
 }
 
+/* ---- Accès Internet : tunnel Cloudflare ---- */
+const TUNNEL_STATUS = {
+  off: ["Désactivé", "off"], installing: ["Installation de cloudflared…", "busy"], starting: ["Connexion à Cloudflare…", "busy"],
+  connected: ["Connecté", "ok"], error: ["Problème", "err"],
+};
+function tabAlive(box, tab) { return box.isConnected && box.dataset.tab === tab; }
+
+async function renderInternetTab(box) {
+  const d = await api("GET", "/api/admin/tunnel");
+  const t = d.tunnel;
+  const [label, tone] = TUNNEL_STATUS[t.status] || [t.status, ""];
+  const links = t.hostnames.map((h) => `<a href="https://${esc(h)}" target="_blank" rel="noopener">https://${esc(h)}</a>`).join(" · ");
+  const keep = { token: ($("#tToken", box) || {}).value || "", logsOpen: !!($("details.tlogs", box) || {}).open };
+  box.innerHTML = `
+    <div class="card tcard">
+      <span class="tdot t-${tone}"></span>
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(label)}${t.status === "connected" ? ` · ${t.connections} connexion${t.connections > 1 ? "s" : ""} à Cloudflare` : ""}</div>
+        <div class="s">${t.status === "connected" && links ? `Easydoc est accessible sur ${links}`
+          : t.status === "connected" ? "Ajoute un nom public au tunnel dans Cloudflare pour obtenir l'adresse."
+          : t.hasToken ? `Tunnel ${esc(t.tunnelId.slice(0, 8))}…${t.enabled ? "" : " (arrêté)"}` : "Aucun tunnel configuré : Easydoc n'est accessible que sur ton réseau."}</div>
+      </div>
+      ${t.enabled ? '<button class="btn" data-act="stop">Arrêter</button>' : t.hasToken ? '<button class="btn btn-primary" data-act="start">Démarrer</button>' : ""}
+    </div>
+    ${t.lastError && t.status !== "connected" ? `<div class="msg err">${esc(t.lastError)}</div>` : ""}
+    ${t.wrongService ? `<div class="msg err">Dans Cloudflare, le nom public pointe vers <code>${esc(t.services.join(", "))}</code> : indique plutôt <code>${esc(t.expectedService)}</code>.</div>` : ""}
+    <div class="field"><label for="tToken">${t.hasToken ? "Remplacer le jeton du tunnel" : "Jeton du tunnel Cloudflare"}</label>
+      <input class="input" id="tToken" type="password" autocomplete="off" spellcheck="false" placeholder="${t.hasToken ? "Laisser vide pour garder le jeton actuel" : "eyJ… (ou colle la commande « cloudflared … » entière)"}" />
+      <span class="hint">Le jeton reste sur ce serveur : il n'est jamais réaffiché ni envoyé aux navigateurs.</span></div>
+    <details class="help">
+      <summary>Comment obtenir le jeton ?</summary>
+      <ol>
+        <li>Sur <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noopener">one.dash.cloudflare.com</a> : <strong>Networks → Tunnels → Create a tunnel</strong>, type <strong>Cloudflared</strong>, donne-lui un nom (ex. « easydoc »).</li>
+        <li>À l'étape d'installation, copie la commande affichée (elle contient le jeton <code>eyJ…</code>) et colle-la ci-dessus : inutile d'installer quoi que ce soit, Easydoc s'en charge.</li>
+        <li>Onglet <strong>Public Hostname</strong> : choisis ton nom de domaine (ex. <code>docs.mondomaine.fr</code>), type <strong>HTTP</strong>, URL <code>${esc(t.expectedService.replace("http://", ""))}</code>.</li>
+        <li>Enregistre : l'adresse s'affiche ici en quelques secondes, en HTTPS.</li>
+      </ol>
+      <p class="muted-sm">Conseils : n'ouvre l'accès Internet qu'après avoir créé tous les comptes, avec des mots de passe solides. Tu peux ajouter une protection Cloudflare Access (code par e-mail) devant Easydoc.</p>
+    </details>
+    <div class="msg"></div>
+    <div class="row-end">
+      ${t.hasToken ? `<button class="btn btn-danger-soft left" data-act="forget">${svg("trash")}Effacer le jeton</button>` : ""}
+      <button class="btn btn-primary" data-act="save">${t.hasToken ? "Enregistrer et redémarrer" : "Activer le tunnel"}</button>
+    </div>
+    ${t.logs.length ? `<details class="tlogs"${keep.logsOpen ? " open" : ""}><summary>Journal de cloudflared${t.version ? ` (version ${esc(t.version)})` : ""}</summary><pre>${esc(t.logs.join("\n"))}</pre></details>` : ""}`;
+  $("#tToken", box).value = keep.token;
+  const busy = (on) => $$(".row-end button, .tcard button", box).forEach((b) => { b.disabled = on; });
+  const send = async (method, body, okMsg) => {
+    busy(true);
+    try {
+      await api(method, "/api/admin/tunnel", body);
+      $("#tToken", box).value = "";
+      await renderInternetTab(box);
+      if (okMsg) setMsg(box, okMsg, "ok");
+    } catch (e) { setMsg(box, e.message, "err"); busy(false); }
+  };
+  $('[data-act="save"]', box).onclick = () => {
+    const token = $("#tToken", box).value.trim();
+    if (!token && !t.hasToken) { setMsg(box, "Colle d'abord le jeton du tunnel.", "err"); $("#tToken", box).focus(); return; }
+    send("POST", { token: token || undefined, enabled: true }, "Tunnel démarré : la connexion à Cloudflare prend quelques secondes.");
+  };
+  const on = (act, fn) => { const b = $(`[data-act="${act}"]`, box); if (b) b.onclick = fn; };
+  on("start", () => send("POST", { enabled: true }));
+  on("stop", () => send("POST", { enabled: false }, "Tunnel arrêté : Easydoc n'est plus accessible depuis Internet."));
+  on("forget", () => send("DELETE", null, "Jeton effacé."));
+  // actualisation tant que l'onglet est affiché (sauf pendant une saisie ou une action)
+  clearTimeout(box._tunnelTimer);
+  const tick = () => {
+    if (!tabAlive(box, "internet")) return;
+    const inp = $("#tToken", box);
+    if ((inp && (inp.value || document.activeElement === inp)) || $(".row-end button:disabled", box)) { box._tunnelTimer = setTimeout(tick, 2000); return; }
+    renderInternetTab(box).catch(() => {});
+  };
+  box._tunnelTimer = setTimeout(tick, t.status === "connected" || t.status === "off" ? 5000 : 1500);
+}
+
+/* ---- Mise à jour d'Easydoc ---- */
+let updateInfo = null;
+async function checkUpdateBadge() {
+  if (!isAdmin()) return;
+  try { updateInfo = await api("GET", "/api/admin/update"); } catch (_e) { return; }
+  const avail = !!(updateInfo.check && updateInfo.check.available);
+  $("#btnSettings").classList.toggle("has-badge", avail);
+  $("#btnSettings").title = avail ? `Administration — Easydoc ${updateInfo.check.latestVersion || ""} disponible` : "Administration : utilisateurs, droits d'accès, dépôt";
+}
+
+const STEP_ICON = { todo: "○", doing: "◌", done: "✓", skip: "–", error: "✕", manual: "!" };
+async function renderUpdateTab(box, opts = {}) {
+  const d = updateInfo = await api("GET", `/api/admin/update${opts.refresh ? "?refresh=1" : ""}`);
+  const c = d.check || {}, job = d.job, av = d.availability;
+  $("#btnSettings").classList.toggle("has-badge", !!c.available);
+  const when = (ts) => new Date(ts).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  let main = "";
+  if (job && (job.running || job.error || (job.ok && !job.upToDate))) {
+    main = `<div class="card ucard"><div style="flex:1">
+        <div class="t">${job.running ? `Mise à jour vers ${esc(job.to || "la nouvelle version")}…` : job.error ? "La mise à jour a échoué" : "Mise à jour installée"}</div>
+        <ol class="steps">${job.steps.map((s) => `<li class="st-${s.status}"><span class="si">${STEP_ICON[s.status] || ""}</span>${esc(s.label)}${s.detail ? ` <span class="muted-sm">· ${esc(s.detail)}</span>` : ""}</li>`).join("")}</ol>
+      </div></div>
+      ${job.error ? `<div class="msg err">${esc(job.error)}${job.rolledBack ? " La version précédente a été remise en place : Easydoc fonctionne comme avant." : ""}</div>` : ""}`;
+  } else if (c.error) {
+    main = `<div class="msg err">${esc(c.error)}</div>`;
+  } else if (c.available) {
+    main = `<div class="card ucard"><span class="tdot t-busy"></span><div style="flex:1;min-width:0">
+        <div class="t">Easydoc ${esc(c.latestVersion || c.remote)} est disponible</div>
+        <div class="s">${c.behind} modification${c.behind > 1 ? "s" : ""} depuis ta version</div></div></div>
+      <ul class="changes">${c.changes.map((x) => `<li><span>${esc(x.title)}</span><span class="muted-sm">${esc(when(x.date))}</span></li>`).join("")}</ul>
+      ${c.blocked ? `<div class="msg err">${esc(c.blocked)}</div>` : `<div class="note">Easydoc redémarre pendant environ 30 secondes : les personnes connectées sont reconnectées automatiquement et rien de ce qui a été écrit n'est perdu. Si la nouvelle version ne démarre pas, l'ancienne est remise en place.</div>`}`;
+  } else if (c.at) {
+    main = `<div class="card ucard"><span class="tdot t-ok"></span><div><div class="t">Easydoc est à jour</div><div class="s">Dernière vérification ${esc(relTime(c.at))}</div></div></div>`;
+  }
+  box.innerHTML = `
+    <div class="row-between"><p class="muted-sm">Version installée : <strong>${esc(d.currentVersion)}</strong>${c.local ? ` (${esc(c.local)})` : ""}${d.last && d.last.ok ? ` · mise à jour depuis la ${esc(d.last.fromVersion)} le ${esc(when(d.last.at))}` : ""}</p>
+      <button class="btn" data-act="check" ${job && job.running ? "disabled" : ""}>${svg("refresh")}Vérifier</button></div>
+    ${!av.ok ? `<div class="note">${esc(av.reasons[0])}</div>` : ""}
+    ${main}
+    <div class="msg"></div>
+    ${c.available && !c.blocked && !(job && job.running) && av.ok ? `<div class="row-end"><button class="btn btn-primary" data-act="update">${svg("download")}Mettre à jour maintenant</button></div>` : ""}`;
+  $('[data-act="check"]', box).onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    setMsg(box, "Vérification…");
+    try { await renderUpdateTab(box, { refresh: true }); } catch (err) { setMsg(box, err.message, "err"); }
+  };
+  const u = $('[data-act="update"]', box);
+  if (u) u.onclick = async () => {
+    u.disabled = true;
+    try { await api("POST", "/api/admin/update"); await renderUpdateTab(box); }
+    catch (e) { setMsg(box, e.message, "err"); u.disabled = false; }
+  };
+  if (job && job.running && tabAlive(box, "update")) {
+    const restarting = job.steps.some((s) => s.id === "restart" && s.status === "doing");
+    if (restarting) { waitForNewVersion(); return; }
+    clearTimeout(box._updTimer);
+    box._updTimer = setTimeout(() => { if (tabAlive(box, "update")) renderUpdateTab(box).catch(() => waitForNewVersion()); }, 1000);
+  }
+}
+
+/** Redémarrage pour mise à jour : on attend la nouvelle version, puis on recharge la page. */
+let waitingVersion = false;
+function waitForNewVersion() {
+  if (waitingVersion) return;
+  waitingVersion = true;
+  sessionLost.done = true; // la coupure est normale : pas de message « session expirée »
+  const banner = document.createElement("div");
+  banner.className = "update-banner";
+  banner.innerHTML = `${svg("download")}<span>Mise à jour d'Easydoc en cours : reconnexion automatique dans quelques secondes…</span>`;
+  document.body.appendChild(banner);
+  const started = Date.now();
+  const poll = async () => {
+    try {
+      const r = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(4000) });
+      if (r.ok) {
+        const h = await r.json();
+        if (h.boot && h.boot !== config.boot) { banner.querySelector("span").textContent = `Easydoc ${h.version} est prêt : rechargement…`; setTimeout(() => location.reload(), 600); return; }
+      }
+    } catch (_e) {}
+    if (Date.now() - started > 180000) { banner.querySelector("span").textContent = "La mise à jour prend plus de temps que prévu : recharge la page dans un instant."; return; }
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 2500);
+}
+
 /* ---- Dépôt ---- */
 async function renderRepoTab(box) {
   const s = await api("GET", "/api/settings");
@@ -1633,6 +1799,7 @@ function pathFromHash() {
   if (isAdmin()) await loadRules();
   await loadPeople();
   toggleAuthors(showAuthors);
+  checkUpdateBadge();
   await refreshTree();
   const wanted = pathFromHash();
   const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files.find(isEditable) || files[0];

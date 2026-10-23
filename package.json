@@ -1,6 +1,6 @@
 {
   "name": "easydoc",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Éditeur Markdown collaboratif en temps réel, auto-hébergé, adossé à un dépôt GitHub.",
   "type": "commonjs",
   "main": "server.js",
