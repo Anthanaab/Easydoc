@@ -1105,6 +1105,7 @@ async function shutdown(sig) {
 
 const updater = new Updater({
   appDir: __dirname, dataDir: DATA_DIR, currentVersion: pkg.version,
+  tokenProvider: () => (repo.mode === "github" ? settings.get().githubToken || process.env.GITHUB_TOKEN || "" : ""),
   beforeRestart: async () => { console.log("[mise à jour] redémarrage sur la nouvelle version…"); await beforeExit(); },
   onEvent: (ev) => {
     if (ev.type === "restarting") bump("restartAt"); // les navigateurs affichent « mise à jour en cours »

@@ -30,14 +30,30 @@ const majorOf = (v) => Number(String(v || "").replace(/^v/, "").split(".")[0]) |
 /** Version minimale de Node demandée par un champ engines (« >=22 », « ^22.1 »…). */
 const minNode = (eng) => { const m = String(eng || "").match(/(\d+)/); return m ? Number(m[1]) : 0; };
 
+/** L'URL d'une origine git, avec le jeton d'Easydoc quand il en existe (dépôt privé). */
+function authUrl(url, token) {
+  if (!token || !String(url).startsWith("https://github.com/")) return String(url || "");
+  try {
+    const u = new URL(url);
+    if (u.username) return String(url); // déjà des identifiants
+    u.username = "oauth2";
+    u.password = token;
+    return u.toString();
+  } catch (_e) { return String(url || ""); }
+}
+
 class Updater {
-  constructor({ appDir, dataDir, currentVersion, beforeRestart, onEvent }) {
+  constructor({ appDir, dataDir, currentVersion, beforeRestart, onEvent, tokenProvider, gitBin, fetchHook }) {
     this.appDir = appDir;
     this.dataDir = dataDir;
+    this.tokenProvider = tokenProvider || (() => "");
     this.currentVersion = currentVersion;
     this.beforeRestart = beforeRestart || (async () => {});
     this.onEvent = onEvent || (() => {});
-    this.git = (args, opts = {}) => run("git", ["-C", this.appDir, ...args], opts);
+    const gb = gitBin || "git";
+    this.git = (args, opts = {}) => run(gb, ["-C", this.appDir, ...args], opts);
+    this._gitBin = gb;
+    this.fetchHook = fetchHook || null;
     this.check = null;     // dernier résultat de vérification
     this.job = null;       // mise à jour en cours / terminée
     this.markerFile = path.join(dataDir, "update-state.json");
@@ -56,9 +72,10 @@ class Updater {
   /** Mise à jour possible ici ? { ok, reasons[], managed } */
   availability() {
     const reasons = [];
+    const isContainer = fs.existsSync("/.dockerenv") || fs.existsSync("/run/systemd/container");
     if (!fs.existsSync(path.join(this.appDir, ".git"))) {
-      reasons.push(fs.existsSync("/.dockerenv")
-        ? "Easydoc tourne dans Docker : mets à jour l'image (docker compose build --pull puis docker compose up -d)."
+      reasons.push(isContainer
+        ? "Easydoc tourne dans un conteneur sans clone git : avec Docker, reconstruis l'image (docker compose build --pull puis docker compose up -d) ; sinon réinstalle-le avec le script Proxmox."
         : "Le code d'Easydoc n'est pas un clone git : réinstalle-le avec le script Proxmox, ou mets-le à jour à la main.");
     } else {
       for (const p of [this.appDir, path.join(this.appDir, ".git"), path.join(this.appDir, "node_modules")]) {
@@ -79,7 +96,8 @@ class Updater {
     try {
       const branch = await this.branch();
       if (branch === "HEAD") throw new Error("Le code d'Easydoc n'est sur aucune branche (version figée) : mise à jour depuis l'interface impossible.");
-      await this.git(["fetch", "--quiet", "origin", branch], { timeout: 90000 });
+      // le dépôt du code peut être privé : on lui donne le jeton d'Easydoc pour ce téléchargement.
+      await this.fetchAuth(branch);
       const local = (await this.git(["rev-parse", "HEAD"])).trim();
       const remote = (await this.git(["rev-parse", `origin/${branch}`])).trim();
       const behind = Number((await this.git(["rev-list", "--count", `HEAD..origin/${branch}`])).trim()) || 0;
@@ -192,6 +210,28 @@ class Updater {
       job.running = false;
       this.onEvent({ type: "done", job });
     }
+  }
+
+  async fetchAuth(branch) {
+    if (typeof this.fetchHook === "function") return this.fetchHook(branch); // tests
+    const origin = (await this.git(["remote", "get-url", "origin"])).trim();
+    const token = this.tokenProvider();
+    const args = ["-C", this.appDir, "fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`];
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    if (token && /^https:\/\//.test(origin)) {
+      // dépôt du code privé : le jeton n'est fourni que pour ce téléchargement, par un
+      // « credential.helper » jetable (aucune URL ni identifiant n'est écrit dans le dépôt).
+      const helper = path.join(this.dataDir, ".git-credential-easydoc");
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      const runArgs = ["-C", this.appDir, "-c", `credential.helper=${helper}`, "fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`];
+      const helperBody = `#!/bin/sh\n[ "$1" = "get" ] && printf 'username=oauth2\\npassword=%s\\n' "$EASYDOC_GIT_TOKEN"\n`;
+      try {
+        fs.writeFileSync(helper, helperBody, { mode: 0o700 });
+        await run(this._gitBin, runArgs, { timeout: 90000, env: { ...env, GIT_TERMINAL_PROMPT: "0", EASYDOC_GIT_TOKEN: token, GITHUB_TOKEN: token } });
+      } finally { try { fs.unlinkSync(helper); } catch (_e) {} }
+      return;
+    }
+    await this.git(["fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], { timeout: 90000 });
   }
 
   /** Les bibliothèques diffèrent-elles entre deux versions ? (le numéro de version seul ne compte pas) */
