@@ -22,7 +22,11 @@ en train d'être tapé.
   images s'affichent dans la page, les fichiers Word (.docx) en aperçu, les autres (Excel, PowerPoint…)
   se téléchargent. Un Word ou un PDF peut être transformé en **version modifiable** (document
   Markdown, modifiable à plusieurs) ; le fichier d'origine est conservé.
-- Dépôt GitHub **connecté depuis l'interface** (Réglages) : aucun jeton à l'installation.
+- **Comptes et droits d'accès** : chaque personne a son compte. Pour chaque dossier ou fichier,
+  l'administrateur choisit qui le voit et qui peut le modifier (*Masqué*, *Lecture seule*,
+  *Lecture et modification*), par personne, par groupe ou pour tout le monde. Les changements
+  s'appliquent immédiatement, même sur un document déjà ouvert.
+- Dépôt GitHub **connecté depuis l'interface** (Administration → Dépôt) : aucun jeton à l'installation.
   **Déconnecter** efface le jeton du serveur et revient aux fichiers locaux (le dépôt GitHub n'est pas touché).
 - Fonctionne aussi sans GitHub (dépôt git local) et sans Internet sur le réseau local.
 
@@ -33,8 +37,12 @@ npm install
 npm start              # http://localhost:3000
 ```
 
-Au premier lancement, Easydoc utilise un dépôt git local (`data/localrepo`) avec quelques
-documents de départ. Pour travailler sur GitHub : **Réglages** (en bas à gauche) → dépôt
+**Au premier accès, Easydoc demande de créer le compte administrateur** : la première personne
+qui ouvre l'adresse le crée (fais-le dès l'installation). Il crée ensuite les comptes des
+autres participants dans **Administration → Utilisateurs**.
+
+Easydoc utilise d'abord un dépôt git local (`data/localrepo`) avec quelques documents de
+départ. Pour travailler sur GitHub : **Administration** (en bas à gauche) → **Dépôt** → dépôt
 (`propriétaire/dépôt` ou URL) + jeton → **Tester** → **Connecter**. La bascule est immédiate.
 
 Jeton : classique avec la permission `repo`, ou fin (*fine-grained*) avec **Contents :
@@ -68,19 +76,52 @@ modifications*). En dépôt local, l'agent peut modifier directement les fichier
   }
   ```
 
+## Comptes et droits d'accès
+
+- **Rôles** : *administrateur* (voit et modifie tout, gère les comptes, les droits et le dépôt)
+  ou *membre* (selon les droits). Un compte peut appartenir à des **groupes** (`graphisme`,
+  `direction`…) pour donner des droits à plusieurs personnes d'un coup.
+- **Droits** (Administration → Droits d'accès, ou le cadenas en haut d'un document ouvert) :
+  une règle par dossier ou fichier, avec une ligne par personne, groupe ou « Tout le monde » :
+  - *Masqué* : le dossier ou fichier n'apparaît pas du tout (le serveur répond « introuvable ») ;
+  - *Lecture seule* : consultation, téléchargement ; toute modification est refusée par le serveur ;
+  - *Lecture et modification*.
+- **Quelle règle s'applique ?** La plus précise : celle du fichier, sinon de son dossier, puis
+  des dossiers parents, puis « Tout le dépôt ». Dans une règle, une ligne pour la personne passe
+  avant ses groupes (le droit le plus élevé), qui passent avant « Tout le monde ». Sans aucune
+  règle, tous les membres peuvent tout lire et modifier.
+- Le panneau affiche, pour chaque compte, le **résultat** effectif sur le dossier ou fichier choisi.
+- Retirer un droit, désactiver un compte ou changer un mot de passe coupe **immédiatement** les
+  connexions concernées.
+
+**Important : les droits s'appliquent dans Easydoc.** Sur GitHub, toute personne (ou tout agent)
+ayant accès au dépôt voit tous les fichiers. Pour des documents vraiment confidentiels, utilise
+un dépôt privé et limite qui y a accès sur GitHub.
+
+**Mot de passe oublié** : sur le serveur, `node cli.js reset-password <identifiant>` (ou, sur
+Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau mot de passe.
+`node cli.js users` liste les comptes.
+
 ## Sécurité
 
-Easydoc n'a **pas de comptes utilisateurs** : toute personne qui accède à l'adresse peut lire,
-modifier et changer le dépôt connecté. Réserve-le à ton réseau local / VPN, ou place-le derrière
-un proxy avec authentification. Les chemins de fichiers sont validés côté serveur (impossible de
-lire ou d'écrire en dehors du dépôt, ni les fichiers cachés comme `.git` ou `.env`).
+- Mots de passe hachés avec **scrypt** ; seule l'empreinte des jetons de session est conservée.
+  Fichiers `data/users.json`, `data/sessions.json`, `data/access.json` en droits 600.
+- Session par cookie `HttpOnly`, `SameSite=Lax` (et `Secure` derrière HTTPS), valable 30 jours,
+  prolongée à l'usage. Requêtes et WebSocket venant d'un autre site refusés.
+- Connexion bloquée 15 min après 8 échecs depuis une même adresse.
+- Les droits sont vérifiés côté serveur sur chaque requête et chaque message temps réel ; le nom
+  inscrit dans les commits est celui du compte connecté (impossible à usurper).
+- Les chemins de fichiers sont validés (impossible de lire ou d'écrire en dehors du dépôt, ni
+  les fichiers cachés comme `.git` ou `.env`).
+- Sans HTTPS, les mots de passe circulent en clair sur le réseau : en dehors d'un réseau local
+  de confiance ou d'un VPN, place Easydoc derrière un proxy HTTPS (voir ci-dessus).
 
 ## Configuration (variables d'environnement, toutes facultatives)
 
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `PORT` | `3000` | Port HTTP |
-| `DATA_DIR` | `./data` | Configuration (`config.json`) et dépôt local |
+| `DATA_DIR` | `./data` | Configuration, comptes, sessions, droits et dépôt local |
 | `LOCAL_REPO_DIR` | `$DATA_DIR/localrepo` | Dépôt git local (mode sans GitHub) |
 | `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
 | `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
@@ -92,6 +133,7 @@ lire ou d'écrire en dehors du dépôt, ni les fichiers cachés comme `.git` ou 
 - `server.js` — serveur HTTP + WebSocket, enregistrement, fusion des modifications externes
 - `src/repo.js` — accès au dépôt (API GitHub ou git local) · `src/paths.js` — validation des chemins
 - `src/convert.js` — aperçu et conversion des fichiers Word et PDF
+- `src/auth.js` — comptes, sessions, droits d'accès · `cli.js` — administration en ligne de commande
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
   DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.

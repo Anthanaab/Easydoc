@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
-COPY server.js ./
+COPY server.js cli.js ./
 COPY src ./src
 COPY public ./public
 

@@ -54,6 +54,10 @@ const ICONS = {
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   unlink: '<path d="m18.84 12.25 1.72-1.71a4.95 4.95 0 0 0-7-7l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a4.95 4.95 0 0 0 7 7l1.71-1.71"/><path d="M8 2v3"/><path d="M2 8h3"/><path d="M16 22v-3"/><path d="M22 16h-3"/>',
+  lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
@@ -83,8 +87,18 @@ async function api(method, url, body) {
   } catch (_e) { throw new Error("Serveur injoignable."); }
   let d = {};
   try { d = await r.json(); } catch (_e) {}
+  if (r.status === 401 && !url.startsWith("/api/auth/")) sessionLost();
   if (!r.ok || d.ok === false) throw new Error(d.error || `Erreur ${r.status}`);
   return d;
+}
+function sessionLost() {
+  if (sessionLost.done) return;
+  sessionLost.done = true;
+  // plus de nouvelles tentatives de connexion temps réel : elles seraient refusées
+  try { if (S && S.provider) S.provider.destroy(); } catch (_e) {}
+  try { if (sys) sys.destroy(); } catch (_e) {}
+  toast("Ta session a expiré : reconnexion…", { error: true });
+  setTimeout(() => location.reload(), 1200);
 }
 
 function relTime(ts) {
@@ -119,21 +133,22 @@ function avatarHTML(user, extra = "") {
   return `<span class="avatar" style="background:${esc(user.color)}" ${extra}>${esc(initials(user.name))}</span>`;
 }
 
-const me = { name: (localStorage.getItem("ed-name") || "").slice(0, 40), color: "" };
-me.color = colorFor(me.name || "?");
-function renderMe() {
-  $("#meName").textContent = me.name || "Anonyme";
-  const a = $("#meAvatar");
-  a.textContent = initials(me.name || "?");
-  a.style.background = me.color;
-}
-function setName(name) {
-  me.name = name.trim().slice(0, 40);
-  me.color = colorFor(me.name);
-  localStorage.setItem("ed-name", me.name);
+let me = null;        // compte connecté
+let adminRules = {};  // règles d'accès (affichées aux administrateurs)
+const isAdmin = () => !!(me && me.role === "admin");
+function setMe(u) {
+  me = { id: u.id, username: u.username, name: u.displayName, role: u.role, groups: u.groups || [], color: colorFor(u.username) };
   renderMe();
-  sys.awareness.setLocalStateField("user", { name: me.name, color: me.color });
-  if (S && S.provider) S.provider.awareness.setLocalStateField("user", { name: me.name, color: me.color });
+  const user = { name: me.name, color: me.color };
+  if (sys) sys.awareness.setLocalStateField("user", user);
+  if (S && S.provider) S.provider.awareness.setLocalStateField("user", user);
+}
+function renderMe() {
+  $("#meName").textContent = me ? me.name : "";
+  const a = $("#meAvatar");
+  a.textContent = initials(me ? me.name : "?");
+  a.style.background = me ? me.color : "#888";
+  $("#btnMe").title = me ? `${me.name} (${me.username}) — mon compte` : "";
 }
 
 function applyTheme(t) {
@@ -148,9 +163,10 @@ function applyTheme(t) {
  * Fenêtres (modales)
  * ========================================================================================== */
 let modalClose = null;
-function openModal({ title, subtitle = "", body = "", foot = "", locked = false, onMount }) {
+function openModal({ title, subtitle = "", body = "", foot = "", locked = false, wide = false, onMount }) {
   closeModal();
   const m = $("#modal"), card = $("#modalCard");
+  card.classList.toggle("wide", wide);
   card.innerHTML = `<div class="m-head"><h3>${esc(title)}</h3>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
     <div class="m-body">${body}</div>${foot ? `<div class="m-foot">${foot}</div>` : ""}`;
   hydrateIcons(card);
@@ -172,19 +188,78 @@ function openModal({ title, subtitle = "", body = "", foot = "", locked = false,
 function closeModal() { if (modalClose) { const f = modalClose; modalClose = null; f(); } }
 function setMsg(card, text, kind = "info") { const m = $(".msg", card); m.className = `msg ${kind}`; m.textContent = text; }
 
-function askName(first = false) {
+/** Premier démarrage (création de l'administrateur) ou connexion. */
+function showAuth(mode) {
+  document.body.classList.add("auth-mode");
+  const setup = mode === "setup";
   openModal({
-    title: first ? "Bienvenue sur Easydoc" : "Ton nom",
-    subtitle: "Il est affiché aux autres participants et apparaît dans l'historique des enregistrements.",
-    locked: first,
-    body: `<div class="field"><label for="fName">Nom</label><input class="input" id="fName" maxlength="40" placeholder="Ex. Camille" value="${esc(me.name)}" /></div>`,
-    foot: `${first ? "" : '<button class="btn" data-act="cancel">Annuler</button>'}<button class="btn btn-primary" data-act="ok">Continuer</button>`,
+    locked: true,
+    title: setup ? "Bienvenue sur Easydoc" : "Connexion à Easydoc",
+    subtitle: setup
+      ? "Crée le compte administrateur. Tu pourras ensuite créer les comptes des autres participants et choisir qui voit quels dossiers."
+      : "Connecte-toi pour accéder aux documents.",
+    body: `<div class="field"><label for="aUser">Identifiant</label><input class="input" id="aUser" autocomplete="username" autocapitalize="none" spellcheck="false" ${setup ? 'placeholder="ex. camille"' : ""} /></div>
+      ${setup ? '<div class="field"><label for="aName">Nom affiché</label><input class="input" id="aName" maxlength="40" placeholder="ex. Camille Martin" /><span class="hint">Visible par les autres participants et dans l\'historique des enregistrements.</span></div>' : ""}
+      <div class="field"><label for="aPass">Mot de passe</label><input class="input" id="aPass" type="password" autocomplete="${setup ? "new-password" : "current-password"}" />${setup ? '<span class="hint">8 caractères minimum.</span>' : ""}</div>
+      ${setup ? '<div class="field"><label for="aPass2">Confirmation du mot de passe</label><input class="input" id="aPass2" type="password" autocomplete="new-password" /></div>' : ""}
+      <div class="msg"></div>`,
+    foot: `<button class="btn btn-primary" data-act="ok">${setup ? "Créer le compte" : "Se connecter"}</button>`,
     onMount(card) {
-      const input = $("#fName", card);
-      const ok = () => { const v = input.value.trim(); if (!v) { input.focus(); return; } setName(v); closeModal(); };
-      $('[data-act="ok"]', card).onclick = ok;
-      const c = $('[data-act="cancel"]', card); if (c) c.onclick = closeModal;
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") ok(); });
+      const go = async () => {
+        const username = $("#aUser", card).value.trim(), password = $("#aPass", card).value;
+        if (!username) return $("#aUser", card).focus();
+        if (!password) return $("#aPass", card).focus();
+        if (setup && password !== $("#aPass2", card).value) return setMsg(card, "Les deux mots de passe ne correspondent pas.", "err");
+        const btn = $('[data-act="ok"]', card);
+        btn.disabled = true;
+        setMsg(card, setup ? "Création du compte…" : "Connexion…");
+        try {
+          await api("POST", setup ? "/api/auth/setup" : "/api/auth/login",
+            setup ? { username, password, displayName: $("#aName", card).value } : { username, password });
+          location.reload();
+        } catch (e) { setMsg(card, e.message, "err"); btn.disabled = false; }
+      };
+      $('[data-act="ok"]', card).onclick = go;
+      card.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("input")) go(); });
+    },
+  });
+}
+
+function openAccount() {
+  openModal({
+    title: "Mon compte",
+    subtitle: `Identifiant : <strong>${esc(me.username)}</strong> · ${isAdmin() ? "administrateur" : "membre"}${me.groups.length ? ` · groupes : ${me.groups.map(esc).join(", ")}` : ""}`,
+    body: `<div class="field"><label for="fDisp">Nom affiché</label><input class="input" id="fDisp" maxlength="40" value="${esc(me.name)}" /></div>
+      <div class="section-t">Changer de mot de passe</div>
+      <div class="field"><label for="fCur">Mot de passe actuel</label><input class="input" id="fCur" type="password" autocomplete="current-password" /></div>
+      <div class="field"><label for="fNew">Nouveau mot de passe</label><input class="input" id="fNew" type="password" autocomplete="new-password" /><span class="hint">8 caractères minimum. Tes sessions sur les autres appareils seront fermées.</span></div>
+      <div class="msg"></div>`,
+    foot: `<button class="btn left" data-act="logout">${svg("logout")}Se déconnecter</button><button class="btn" data-act="cancel">Fermer</button><button class="btn btn-primary" data-act="save">Enregistrer</button>`,
+    onMount(c) {
+      $('[data-act="cancel"]', c).onclick = closeModal;
+      $('[data-act="logout"]', c).onclick = async () => {
+        sessionLost.done = true;
+        try { await api("POST", "/api/auth/logout"); } catch (_e) {}
+        location.reload();
+      };
+      $('[data-act="save"]', c).onclick = async () => {
+        const name = $("#fDisp", c).value.trim(), cur = $("#fCur", c).value, next = $("#fNew", c).value;
+        const busy = (on) => $$(".m-foot button", c).forEach((b) => { b.disabled = on; });
+        busy(true);
+        try {
+          if (name && name !== me.name) setMe((await api("POST", "/api/auth/profile", { displayName: name })).user);
+          if (cur || next) {
+            if (!cur) throw new Error("Indique ton mot de passe actuel.");
+            await api("POST", "/api/auth/password", { current: cur, next });
+            sessionLost.done = true; // les connexions temps réel vont être renouvelées
+            setMsg(c, "Mot de passe changé.", "ok");
+            setTimeout(() => location.reload(), 900);
+            return;
+          }
+          closeModal();
+          toast("Compte mis à jour.");
+        } catch (e) { setMsg(c, e.message, "err"); busy(false); }
+      };
     },
   });
 }
@@ -192,24 +267,41 @@ function askName(first = false) {
 /* ============================================================================================
  * Canal système : présence globale + notifications (liste des fichiers, changement de dépôt)
  * ========================================================================================== */
-const sysDoc = new Y.Doc();
-const sys = new WebsocketProvider(wsBase, "__system__", sysDoc, { disableBc: true });
-const sysMap = sysDoc.getMap("sys");
+let sysDoc = null, sys = null, sysMap = null;
 let seenVersions = null;
-sys.awareness.setLocalStateField("user", { name: me.name || "Anonyme", color: me.color });
-sys.on("sync", (ok) => {
-  if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion") };
-});
-sysMap.observe(() => {
-  if (!seenVersions) return;
-  const cfg = sysMap.get("configVersion"), tree = sysMap.get("treeVersion");
-  if (cfg !== undefined && cfg !== seenVersions.config) { toast("Le dépôt connecté a changé — rechargement…"); setTimeout(() => location.reload(), 800); return; }
-  if (tree !== seenVersions.tree) { seenVersions.tree = tree; refreshTree(); }
-});
-sys.awareness.on("change", () => { renderPresence(); renderTree(); });
+function connectSystem() {
+  sysDoc = new Y.Doc();
+  sys = new WebsocketProvider(wsBase, "__system__", sysDoc, { disableBc: true });
+  sysMap = sysDoc.getMap("sys");
+  sys.awareness.setLocalStateField("user", { name: me.name, color: me.color });
+  sys.on("sync", (ok) => {
+    if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion") };
+  });
+  sys.on("connection-close", (ev) => { if (ev && ev.code === 4001) sessionLost(); });
+  sysMap.observe(() => {
+    if (!seenVersions) return;
+    const cfg = sysMap.get("configVersion"), tree = sysMap.get("treeVersion");
+    if (cfg !== undefined && cfg !== seenVersions.config) { toast("Le dépôt connecté a changé — rechargement…"); setTimeout(() => location.reload(), 800); return; }
+    if (tree !== seenVersions.tree) { seenVersions.tree = tree; refreshTree(); if (isAdmin()) loadRules(); }
+  });
+  sys.awareness.on("change", () => { renderPresence(); renderTree(); });
+}
+const setPresence = (k, v) => { if (sys) sys.awareness.setLocalStateField(k, v); };
+/** Empreinte d'un chemin : la présence ne révèle pas aux autres le nom des fichiers qu'ils ne voient pas. */
+function hashPath(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
 
 function othersByPath() {
   const out = new Map();
+  if (!sys) return out;
   sys.awareness.getStates().forEach((s, id) => {
     if (id === sysDoc.clientID || !s.user || !s.path) return;
     if (!out.has(s.path)) out.set(s.path, []);
@@ -225,6 +317,7 @@ let files = [];
 const fileInfo = new Map(); // chemin → { size, kind }
 const closed = new Set(JSON.parse(localStorage.getItem("ed-closed") || "[]"));
 const currentPath = () => (S ? S.path : F ? F.path : null);
+const canWrite = (p) => (fileInfo.get(p) || {}).access === "write";
 
 async function refreshTree() {
   try {
@@ -233,8 +326,10 @@ async function refreshTree() {
     for (const f of d.files) fileInfo.set(f.path, f);
     files = d.files.map((f) => f.path).sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
     renderTree();
-    if (F && !fileInfo.has(F.path)) { toast("Ce fichier a été supprimé."); showEmpty(); }
-    else if (F) { F.size = fileInfo.get(F.path).size; renderStatus(); }
+    const cur = currentPath();
+    if (cur && !fileInfo.has(cur) && (F || (S && S.loaded))) { toast("Ce fichier n'est plus disponible (supprimé ou accès retiré)."); showEmpty(); }
+    else if (F) { F.size = fileInfo.get(F.path).size; renderStatus(); updateButtons(); }
+    else if (S && S.loaded && !S.offline) { ta.readOnly = !canWrite(S.path); renderStatus(); updateButtons(); }
   } catch (e) { toast("Impossible de lire la liste des fichiers : " + e.message, { error: true }); }
 }
 
@@ -258,9 +353,11 @@ function fileNode(p, others, showDir) {
   el.className = "node file" + (currentPath() === p ? " active" : "");
   el.title = p;
   el.dataset.path = p;
-  const dots = (others.get(p) || []).slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
+  const dots = (others.get(hashPath(p)) || []).slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
   const where = showDir && dirName(p) ? ` <span class="ext">· ${esc(dirName(p))}</span>` : "";
-  el.innerHTML = `${iconFor(p)}<span class="name">${esc(displayName(p))}${where}</span><span class="dots">${dots}</span>`;
+  const mark = isAdmin() && adminRules[p] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>`
+    : !isAdmin() && (fileInfo.get(p) || {}).access === "read" ? `<span class="lockmark" title="Lecture seule">${svg("eye")}</span>` : "";
+  el.innerHTML = `${iconFor(p)}<span class="name">${esc(displayName(p))}${where}</span>${mark}<span class="dots">${dots}</span>`;
   el.onclick = () => { openFile(p); $("#app").classList.remove("nav-open"); };
   return el;
 }
@@ -283,7 +380,8 @@ function renderTree() {
       const row = document.createElement("div");
       row.className = "node folder" + (open ? " open" : "");
       row.dataset.dir = d.path;
-      row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}<span class="name">${esc(name)}</span>`;
+      const lock = isAdmin() && adminRules[d.path] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>` : "";
+      row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}<span class="name">${esc(name)}</span>${lock}`;
       row.onclick = () => {
         if (closed.has(d.path)) closed.delete(d.path); else closed.add(d.path);
         localStorage.setItem("ed-closed", JSON.stringify([...closed]));
@@ -364,12 +462,12 @@ function closeSession() {
   clearTimeout(s.fallbackTimer); clearTimeout(s.offlineTimer); clearInterval(s.retryTimer);
   try { s.provider && s.provider.destroy(); } catch (_e) {}
   try { s.ydoc.destroy(); } catch (_e) {}
-  sys.awareness.setLocalStateField("path", null);
+  setPresence("path", null);
 }
 
 function showEmpty() {
   closeSession();
-  sys.awareness.setLocalStateField("path", null);
+  setPresence("path", null);
   setArea("empty");
   ta.value = "";
   $("#crumbs").innerHTML = "";
@@ -388,7 +486,7 @@ function enterPath(path) {
   renderCrumbs(path);
   document.title = `${displayName(path)} — Easydoc`;
   history.replaceState(null, "", "#/" + encPath(path));
-  sys.awareness.setLocalStateField("path", path);
+  setPresence("path", hashPath(path));
 }
 
 function openFile(path, opts = {}) {
@@ -404,7 +502,7 @@ function openFile(path, opts = {}) {
     lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null,
   };
   s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set([LOCAL]), captureTimeout: 600 });
-  provider.awareness.setLocalStateField("user", { name: me.name || "Anonyme", color: me.color }); // nom dans l'historique
+  provider.awareness.setLocalStateField("user", { name: me.name, color: me.color });
 
   setArea("loading", s.kind === "text" ? "text" : "");
   ta.readOnly = true;
@@ -418,6 +516,18 @@ function openFile(path, opts = {}) {
     s.connected = e.status === "connected";
     if (!s.connected && s.loaded && !s.offline) startReconnect(s);
     renderStatus();
+  });
+
+  provider.on("connection-close", (ev) => {
+    if (S !== s || !ev) return;
+    if (ev.code === 4003) {
+      setTimeout(() => {
+        if (S !== s) return;
+        toast("Ton accès à ce document a été retiré.", { error: true });
+        showEmpty();
+        refreshTree();
+      }, 0);
+    } else if (ev.code === 4001) sessionLost();
   });
 
   s.ytext.observe((event) => {
@@ -455,11 +565,11 @@ function onLoaded(s) {
     return;
   }
   setArea("doc", s.kind === "text" ? "text" : "");
-  ta.readOnly = false;
-  ta.placeholder = s.kind === "text" ? "Commence à écrire…" : "Commence à écrire… (Markdown)";
+  ta.readOnly = !canWrite(s.path);
+  ta.placeholder = ta.readOnly ? "" : s.kind === "text" ? "Commence à écrire…" : "Commence à écrire… (Markdown)";
   ta.value = s.ytext.toString();
   autosize();
-  if (s.pendingText != null && s.pendingText !== ta.value) {
+  if (s.pendingText != null && s.pendingText !== ta.value && !ta.readOnly) {
     ta.value = s.pendingText;
     applyLocal(s.pendingText);
     s.dirty = true; s.lastLocalEdit = Date.now();
@@ -479,9 +589,14 @@ function startReconnect(s) {
   s.retryTimer = setInterval(async () => {
     if (S !== s) { clearInterval(s.retryTimer); return; }
     try {
-      const r = await fetch("/api/health", { cache: "no-store" });
+      const r = await fetch("/api/auth/state", { cache: "no-store" });
       if (!r.ok) return;
+      const state = await r.json();
       clearInterval(s.retryTimer);
+      if (!state.user) { sessionLost(); return; }
+      await refreshTree();
+      if (S !== s) return;
+      if (!fileInfo.has(s.path)) { toast("Ce document n'est plus disponible."); showEmpty(); return; }
       const pending = s.dirty || ta.value !== s.ytext.toString() ? ta.value : null;
       openFile(s.path, { force: true, pendingText: pending });
     } catch (_e) {}
@@ -497,8 +612,8 @@ async function startOffline(s) {
     if (S !== s) return;
     s.loaded = true;
     setArea("doc", s.kind === "text" ? "text" : "");
-    ta.readOnly = false;
-    ta.placeholder = "Commence à écrire…";
+    ta.readOnly = !canWrite(s.path);
+    ta.placeholder = ta.readOnly ? "" : "Commence à écrire…";
     ta.value = d.content;
     autosize(); renderPreview(); renderStatus(); updateButtons();
     toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
@@ -510,7 +625,7 @@ async function startOffline(s) {
 async function saveNow(manual) {
   if (!S || !S.loaded) return;
   const s = S;
-  const body = { path: s.path, author: me.name };
+  const body = { path: s.path };
   if (s.offline) body.content = ta.value;
   s.saving = true; renderStatus();
   try {
@@ -539,7 +654,7 @@ ta.addEventListener("input", () => {
 });
 
 ta.addEventListener("keydown", (e) => {
-  if (!S || !S.loaded) return;
+  if (!S || !S.loaded || ta.readOnly) return;
   const mod = e.ctrlKey || e.metaKey;
   if (mod && !S.offline && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
     e.preventDefault();
@@ -557,7 +672,7 @@ function publishLine() {
   lineT = setTimeout(() => {
     if (!S) return;
     const line = ta.value.slice(0, ta.selectionStart).split("\n").length;
-    sys.awareness.setLocalStateField("line", line);
+    setPresence("line", line);
   }, 250);
 }
 ["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
@@ -627,7 +742,7 @@ function convertFile(path) {
         $$(".m-foot button", card).forEach((b) => { b.disabled = true; });
         setMsg(card, "Conversion en cours…");
         try {
-          const d = await api("POST", "/api/convert", { path, author: me.name });
+          const d = await api("POST", "/api/convert", { path });
           closeModal();
           await refreshTree();
           openFile(d.path);
@@ -664,7 +779,7 @@ async function uploadFiles(list, folder = currentFolder()) {
     const name = cleanName(f.name);
     const p = folder ? `${folder}/${name}` : name;
     try {
-      const r = await fetch(`/api/upload?path=${encodeURIComponent(p)}&author=${encodeURIComponent(me.name)}`, {
+      const r = await fetch(`/api/upload?path=${encodeURIComponent(p)}`, {
         method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: f,
       });
       const d = await r.json().catch(() => ({}));
@@ -753,7 +868,7 @@ function renderStatus() {
   const el = $("#status");
   let text = "", tone = "", title = "";
   if (F) {
-    text = `${KIND_LABEL[F.kind]}${F.size != null ? " · " + fmtSize(F.size) : ""}`;
+    text = `${KIND_LABEL[F.kind]}${F.size != null ? " · " + fmtSize(F.size) : ""}${canWrite(F.path) ? "" : " · lecture seule"}`;
     const line = $("#fileMetaLine");
     if (line) line.textContent = text;
   } else if (S) {
@@ -761,6 +876,7 @@ function renderStatus() {
     if (!S.loaded) { text = "Chargement…"; tone = "busy"; }
     else if (S.offline) { text = S.dirty ? "Hors ligne · enregistrement…" : "Hors ligne · enregistré"; tone = "busy"; }
     else if (S.reconnecting || !S.connected) { text = "Reconnexion…"; tone = "busy"; }
+    else if (ta.readOnly) { text = "Lecture seule"; title = "Tu peux lire ce document mais pas le modifier."; }
     else if (err) { text = "Échec de l'enregistrement"; tone = "err"; title = err; }
     else if (S.saving || S.dirty) { text = "Modifications en cours…"; tone = "busy"; }
     else { text = "Enregistré · " + relTime(S.savedSeen || Date.now()); tone = "ok"; }
@@ -775,16 +891,20 @@ function renderPresence() {
   const box = $("#presence");
   const p = currentPath();
   if (!p) { box.innerHTML = ""; return; }
-  const list = othersByPath().get(p) || [];
+  const list = othersByPath().get(hashPath(p)) || [];
   const shown = list.slice(0, 4).map((u) => avatarHTML(u, `title="${esc(u.name)}${u.line && S ? ` — ligne ${esc(u.line)}` : ""}"`)).join("");
   const more = list.length > 4 ? `<span class="avatar more" title="${list.length - 4} autres">+${list.length - 4}</span>` : "";
   box.innerHTML = shown + more;
 }
 
 function updateButtons() {
-  $("#btnSave").disabled = !(S && S.loaded);
-  $("#btnSave").style.display = F ? "none" : "";
-  $("#btnDelete").disabled = !currentPath();
+  const p = currentPath();
+  const writable = !!p && canWrite(p);
+  $("#btnSave").disabled = !(S && S.loaded) || !writable;
+  $("#btnSave").style.display = F || (S && !writable) ? "none" : "";
+  $("#btnDelete").disabled = !writable;
+  $("#btnDelete").style.display = p && !writable ? "none" : "";
+  $("#btnAccess").hidden = !(isAdmin() && p);
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
@@ -866,7 +986,7 @@ function confirmDisconnect(s) {
       Easydoc revient aux fichiers stockés sur ce serveur ; tu pourras connecter un autre dépôt quand tu veux.</div><div class="msg"></div>`,
     foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-danger" data-act="ok">Déconnecter</button>',
     onMount(c) {
-      $('[data-act="cancel"]', c).onclick = () => openSettings();
+      $('[data-act="cancel"]', c).onclick = () => openAdmin("repo");
       $('[data-act="ok"]', c).onclick = async () => {
         $$(".m-foot button", c).forEach((b) => { b.disabled = true; });
         try {
@@ -879,51 +999,275 @@ function confirmDisconnect(s) {
   });
 }
 
-async function openSettings() {
-  let s = {};
-  try { s = await api("GET", "/api/settings"); } catch (_e) {}
+/* ============================================================================================
+ * Administration : utilisateurs, droits d'accès, dépôt
+ * ========================================================================================== */
+const LEVEL_LBL = { none: "Masqué", read: "Lecture seule", write: "Lecture et modification" };
+const ROLE_LBL = { admin: "Administrateur", member: "Membre" };
+
+async function loadRules() {
+  try { adminRules = (await api("GET", "/api/admin/access")).rules || {}; } catch (_e) { adminRules = {}; }
+  renderTree();
+}
+
+function genPassword() {
+  const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(14));
+  return [...bytes].map((b) => alphabet[b % alphabet.length]).join("");
+}
+
+function openAdmin(tab = "users", opts = {}) {
+  const tabs = [["users", "Utilisateurs", "users"], ["access", "Droits d'accès", "lock"], ["repo", "Dépôt", "branch"]];
+  openModal({
+    title: "Administration",
+    wide: true,
+    body: `<div class="tabs" role="tablist">${tabs.map(([k, l, i]) => `<button data-tab="${k}" role="tab">${svg(i)}${l}</button>`).join("")}</div>
+      <div class="tab-body" id="tabBody"></div>`,
+    onMount(card) {
+      const show = (k, o = {}) => {
+        for (const b of $$(".tabs button", card)) b.classList.toggle("on", b.dataset.tab === k);
+        const box = $("#tabBody", card);
+        box.dataset.tab = k;
+        box.innerHTML = '<div class="loadingview">Chargement…</div>';
+        const render = k === "users" ? renderUsersTab : k === "access" ? renderAccessTab : renderRepoTab;
+        render(box, o).catch((e) => { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
+      };
+      for (const b of $$(".tabs button", card)) b.onclick = () => show(b.dataset.tab);
+      show(tab, opts);
+    },
+  });
+}
+
+/* ---- Utilisateurs ---- */
+async function renderUsersTab(box, opts = {}) {
+  const d = await api("GET", "/api/admin/users");
+  box.innerHTML = `<div class="row-between"><p class="muted-sm">${d.users.length} compte${d.users.length > 1 ? "s" : ""} · les administrateurs ont accès à tout, les membres selon les droits d'accès.</p>
+      <button class="btn btn-primary" data-act="new">${svg("plus")}Nouvel utilisateur</button></div>
+    <div class="msg"></div>
+    <div class="ulist">${d.users.map((u) => `<div class="urow${u.disabled ? " off" : ""}" data-id="${esc(u.id)}">
+        ${avatarHTML({ name: u.displayName, color: colorFor(u.username) })}
+        <div class="umeta"><div class="t">${esc(u.displayName)}${u.id === me.id ? ' <span class="tag">toi</span>' : ""}${u.disabled ? ' <span class="tag tag-off">désactivé</span>' : ""}</div>
+          <div class="s">${esc(u.username)} · ${ROLE_LBL[u.role]}${u.groups.length ? " · " + u.groups.map(esc).join(", ") : ""}</div></div>
+        <button class="btn" data-act="edit">Modifier</button>
+      </div>`).join("")}</div>`;
+  if (opts.notice) setMsg(box, opts.notice, "ok");
+  $('[data-act="new"]', box).onclick = () => userForm(box, null, d.groups);
+  for (const row of $$(".urow", box)) {
+    $('[data-act="edit"]', row).onclick = () => userForm(box, d.users.find((u) => u.id === row.dataset.id), d.groups);
+  }
+}
+
+function userForm(box, u, groups) {
+  const isNew = !u, self = !!u && u.id === me.id;
+  box.innerHTML = `<div class="section-t">${isNew ? "Nouvel utilisateur" : `Modifier le compte de ${esc(u.displayName)}`}</div>
+    <div class="grid2">
+      <div class="field"><label for="uLogin">Identifiant</label>
+        <input class="input" id="uLogin" ${isNew ? "" : "disabled"} value="${esc(u ? u.username : "")}" placeholder="ex. alex" autocapitalize="none" spellcheck="false" autocomplete="off" />
+        <span class="hint">${isNew ? "Sert à se connecter : minuscules, chiffres, point ou tiret." : "Ne peut pas être modifié."}</span></div>
+      <div class="field"><label for="uName">Nom affiché</label>
+        <input class="input" id="uName" maxlength="40" value="${esc(u ? u.displayName : "")}" placeholder="ex. Alex Durand" /></div>
+      <div class="field"><label for="uRole">Rôle</label>
+        <select class="input" id="uRole" ${self ? "disabled" : ""}><option value="member">Membre</option><option value="admin">Administrateur (accès à tout)</option></select></div>
+      <div class="field"><label for="uGroups">Groupes</label>
+        <input class="input" id="uGroups" list="groupList" value="${esc(u ? u.groups.join(", ") : "")}" placeholder="ex. graphisme, direction" autocomplete="off" />
+        <datalist id="groupList">${groups.map((g) => `<option value="${esc(g)}"></option>`).join("")}</datalist>
+        <span class="hint">Séparés par des virgules. Pour donner des droits à plusieurs personnes d'un coup.</span></div>
+    </div>
+    <div class="field"><label for="uPass">${isNew ? "Mot de passe" : "Nouveau mot de passe"}</label>
+      <div class="inline"><input class="input" id="uPass" type="text" autocomplete="off" spellcheck="false" placeholder="${isNew ? "8 caractères minimum" : "Laisser vide pour ne pas le changer"}" />
+        <button class="btn" data-act="gen">Générer</button></div>
+      <span class="hint">${isNew ? "Communique-le à la personne : elle pourra le changer depuis « Mon compte »." : "Ses sessions ouvertes seront fermées."}</span></div>
+    ${isNew || self ? "" : `<label class="check"><input type="checkbox" id="uOff" ${u.disabled ? "checked" : ""} /> Compte désactivé (connexion impossible, accès coupé immédiatement)</label>`}
+    <div class="msg"></div>
+    <div class="row-end">
+      ${isNew || self ? "" : `<button class="btn btn-danger-soft left" data-act="del">${svg("trash")}Supprimer le compte</button>`}
+      <button class="btn" data-act="back">Retour</button>
+      <button class="btn btn-primary" data-act="save">${isNew ? "Créer le compte" : "Enregistrer"}</button>
+    </div>`;
+  $("#uRole", box).value = u ? u.role : "member";
+  (isNew ? $("#uLogin", box) : $("#uName", box)).focus();
+  const busy = (on) => $$(".row-end button", box).forEach((b) => { b.disabled = on; });
+  $('[data-act="gen"]', box).onclick = () => { $("#uPass", box).value = genPassword(); };
+  $('[data-act="back"]', box).onclick = () => renderUsersTab(box);
+  $('[data-act="save"]', box).onclick = async () => {
+    const body = { displayName: $("#uName", box).value, role: $("#uRole", box).value, groups: $("#uGroups", box).value };
+    const pw = $("#uPass", box).value;
+    busy(true);
+    try {
+      if (isNew) {
+        const username = $("#uLogin", box).value.trim().toLowerCase();
+        const d = await api("POST", "/api/admin/users", { ...body, username, password: pw });
+        await renderUsersTab(box, { notice: `Compte créé pour ${d.user.displayName}. Identifiant : ${d.user.username} · mot de passe : ${pw}` });
+      } else {
+        if (pw) body.password = pw;
+        if ($("#uOff", box)) body.disabled = $("#uOff", box).checked;
+        const d = await api("PATCH", `/api/admin/users/${encodeURIComponent(u.id)}`, body);
+        if (self) setMe(d.user);
+        await renderUsersTab(box, { notice: pw ? `Compte mis à jour. Nouveau mot de passe : ${pw}` : "Compte mis à jour." });
+      }
+    } catch (e) { setMsg(box, e.message, "err"); busy(false); }
+  };
+  const del = $('[data-act="del"]', box);
+  if (del) {
+    del.onclick = async () => {
+      if (!del.dataset.confirm) {
+        del.dataset.confirm = "1";
+        del.innerHTML = `${svg("trash")}Confirmer la suppression`;
+        setMsg(box, `Le compte de ${u.displayName} sera supprimé définitivement (ses enregistrements restent dans l'historique). Clique de nouveau pour confirmer.`, "err");
+        return;
+      }
+      busy(true);
+      try {
+        await api("DELETE", `/api/admin/users/${encodeURIComponent(u.id)}`);
+        await renderUsersTab(box, { notice: `Compte de ${u.displayName} supprimé.` });
+      } catch (e) { setMsg(box, e.message, "err"); busy(false); }
+    };
+  }
+}
+
+/* ---- Droits d'accès ---- */
+function allFolders() {
+  const set = new Set();
+  for (const p of files) {
+    const parts = p.split("/");
+    for (let i = 1; i < parts.length; i++) set.add(parts.slice(0, i).join("/"));
+  }
+  return [...set].sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
+}
+
+async function renderAccessTab(box, opts = {}) {
+  const d = await api("GET", "/api/admin/access");
+  adminRules = d.rules || {};
+  renderTree();
+  const target = opts.path != null ? opts.path : box.dataset.path || "";
+  box.dataset.path = target;
+  const rule = adminRules[target];
+  const mark = (v) => (adminRules[v] ? "● " : "");
+  const opt = (v, label) => `<option value="${esc(v)}"${v === target ? " selected" : ""}>${mark(v)}${esc(label)}</option>`;
+  const folders = allFolders();
+  const known = [["*", "Tout le monde"],
+    ...d.groups.map((g) => [`group:${g}`, `Groupe « ${g} »`]),
+    ...d.users.filter((u) => u.role !== "admin").map((u) => [`user:${u.username}`, `${u.displayName} (${u.username})`])];
+  const whoOptions = (who) => {
+    const list = known.some(([v]) => v === who) ? known : [[who, who.replace(/^(user|group):/, "")], ...known];
+    return list.map(([v, l]) => `<option value="${esc(v)}"${v === who ? " selected" : ""}>${esc(l)}</option>`).join("");
+  };
+  const rowHTML = (who, lvl) => `<div class="arow">
+      <select class="input a-who" aria-label="Qui">${whoOptions(who)}</select>
+      <select class="input a-lvl" aria-label="Accès">${Object.entries(LEVEL_LBL).map(([v, l]) => `<option value="${v}"${v === lvl ? " selected" : ""}>${l}</option>`).join("")}</select>
+      <button class="icon-btn" data-act="rm" title="Retirer cette ligne">${svg("x")}</button></div>`;
+  const emptyText = target === ""
+    ? "Aucune règle générale : tous les membres peuvent lire et modifier tout ce qui n'a pas de règle particulière."
+    : "Aucune règle ici : les droits du dossier parent (ou de « Tout le dépôt ») s'appliquent.";
+  const kindLbl = target === "" ? "l'ensemble du dépôt" : folders.includes(target) ? `le dossier « ${target} » et tout son contenu` : `le fichier « ${target} »`;
+
+  box.innerHTML = `
+    <div class="field"><label for="aPath">Dossier ou fichier</label>
+      <select class="input" id="aPath">${opt("", "Tout le dépôt (règle générale)")}
+        ${folders.length ? `<optgroup label="Dossiers">${folders.map((f) => opt(f, f + "/")).join("")}</optgroup>` : ""}
+        <optgroup label="Fichiers">${files.map((f) => opt(f, f)).join("")}</optgroup></select>
+      <span class="hint">● = règle déjà définie. Cette règle s'applique à ${esc(kindLbl)}.</span></div>
+    <div class="arows" id="aRows">${rule ? Object.entries(rule).map(([w, l]) => rowHTML(w, l)).join("") : `<div class="arows-empty">${emptyText}</div>`}</div>
+    <button class="btn btn-ghost btn-add" data-act="add">${svg("plus")}Ajouter une ligne</button>
+    <div class="note">La règle la plus précise s'applique : celle du fichier, sinon celle de son dossier, puis des dossiers parents, puis « Tout le dépôt ».
+      Dans une règle, une ligne pour une personne passe avant ses groupes, qui passent avant « Tout le monde ». Les administrateurs ont toujours accès à tout.</div>
+    <div class="msg"></div>
+    <div class="row-end">
+      ${rule ? `<button class="btn left" data-act="clear">${target === "" ? "Revenir au réglage par défaut" : "Retirer cette règle"}</button>` : ""}
+      <button class="btn btn-primary" data-act="save">Enregistrer</button></div>
+    <div class="section-t">Résultat pour chaque compte</div>
+    <div class="eff" id="aEff"><div class="erow muted-sm">Calcul…</div></div>`;
+
+  const rows = $("#aRows", box);
+  $("#aPath", box).onchange = (e) => renderAccessTab(box, { path: e.target.value });
+  $('[data-act="add"]', box).onclick = () => {
+    const empty = $(".arows-empty", rows);
+    if (empty) empty.remove();
+    const used = new Set($$(".a-who", rows).map((x) => x.value));
+    const next = known.find(([v]) => !used.has(v));
+    rows.insertAdjacentHTML("beforeend", rowHTML(next ? next[0] : "*", "read"));
+  };
+  rows.addEventListener("click", (e) => {
+    const rm = e.target.closest('[data-act="rm"]');
+    if (!rm) return;
+    rm.closest(".arow").remove();
+    if (!$(".arow", rows)) rows.innerHTML = `<div class="arows-empty">${emptyText}</div>`;
+  });
+  const busy = (on) => $$(".row-end button", box).forEach((b) => { b.disabled = on; });
+  const save = async (entries) => {
+    busy(true);
+    try {
+      const r = await api("PUT", "/api/admin/access", { path: target, entries });
+      await renderAccessTab(box, { path: target });
+      setMsg(box, Object.keys(entries).length ? "Droits enregistrés et appliqués immédiatement." : "Règle retirée.", "ok");
+      renderEffective(r.users);
+    } catch (e) { setMsg(box, e.message, "err"); busy(false); }
+  };
+  $('[data-act="save"]', box).onclick = () => {
+    const entries = {};
+    for (const row of $$(".arow", rows)) {
+      const who = $(".a-who", row).value;
+      if (entries[who]) {
+        const label = $(".a-who", row).selectedOptions[0].textContent;
+        return setMsg(box, `« ${label} » apparaît deux fois : garde une seule ligne.`, "err");
+      }
+      entries[who] = $(".a-lvl", row).value;
+    }
+    save(entries);
+  };
+  const clear = $('[data-act="clear"]', box);
+  if (clear) clear.onclick = () => save({});
+
+  function renderEffective(list) {
+    $("#aEff", box).innerHTML = list.map((u) => `<div class="erow">${avatarHTML({ name: u.displayName, color: colorFor(u.username) })}
+        <span class="n">${esc(u.displayName)} <span class="muted-sm">${esc(u.username)}${u.role === "admin" ? " · administrateur" : ""}${u.disabled ? " · désactivé" : ""}</span></span>
+        <span class="lvl lvl-${u.level}">${LEVEL_LBL[u.level]}</span></div>`).join("");
+  }
+  api("GET", `/api/admin/access/effective?path=${encodeURIComponent(target)}`).then((r) => renderEffective(r.users)).catch(() => {});
+}
+
+/* ---- Dépôt ---- */
+async function renderRepoTab(box) {
+  const s = await api("GET", "/api/settings");
   const gh = s.mode === "github";
   const card = gh
     ? `<div class="card">${svg("branch")}<div style="flex:1;min-width:0"><div class="t">${esc(s.repo)}</div><div class="s">Branche ${esc(s.branch)}${s.login ? ` · connecté en tant que ${esc(s.login)}` : ""}</div></div>
         <button class="btn btn-danger-soft" data-act="disconnect">${svg("unlink")}Déconnecter</button></div>`
     : `<div class="card">${svg("database")}<div><div class="t">Dépôt local</div><div class="s">Aucun dépôt GitHub : les fichiers sont enregistrés sur ce serveur.</div></div></div>`;
-  openModal({
-    title: "Dépôt",
-    subtitle: gh ? "Pour passer à un autre dépôt, indique-le ci-dessous puis clique sur Connecter." : "Connecte un dépôt GitHub pour y enregistrer les fichiers (un commit par enregistrement).",
-    body: `${card}
-      <div class="field"><label for="fRepo">${gh ? "Autre dépôt GitHub" : "Dépôt GitHub"}</label>
-        <input class="input" id="fRepo" placeholder="propriétaire/dépôt ou URL GitHub" value="" /></div>
-      <div class="field"><label for="fToken">Jeton d'accès</label>
-        <input class="input" id="fToken" type="password" autocomplete="off" placeholder="${s.hasToken ? "Laisser vide pour garder le jeton actuel" : "ghp_… ou github_pat_…"}" />
-        <span class="hint">Jeton avec accès en écriture au dépôt (classique : permission <code>repo</code> ; fin : Contents en lecture/écriture). <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">Créer un jeton</a></span></div>
-      <div class="field"><label for="fBranch">Branche <span style="color:var(--muted);font-weight:400">(facultatif)</span></label>
-        <input class="input" id="fBranch" placeholder="branche par défaut du dépôt" value="" /></div>
-      <div class="msg"></div>`,
-    foot: '<button class="btn" data-act="test">Tester</button><button class="btn btn-primary" data-act="save">Connecter</button>',
-    onMount(c) {
-      const vals = () => ({ githubRepo: $("#fRepo", c).value, githubToken: $("#fToken", c).value, githubBranch: $("#fBranch", c).value });
-      const busy = (on) => $$(".m-foot button", c).forEach((b) => { b.disabled = on; });
-      $('[data-act="test"]', c).onclick = async () => {
-        busy(true); setMsg(c, "Vérification…");
-        try {
-          const d = await api("POST", "/api/settings/test", vals());
-          setMsg(c, d.repo ? `Jeton valide (${d.login}). Dépôt ${d.repo.full_name} accessible en écriture, branche par défaut : ${d.repo.default_branch}.` : `Jeton valide (${d.login}).`, "ok");
-        } catch (e) { setMsg(c, e.message, "err"); }
-        busy(false);
-      };
-      $('[data-act="save"]', c).onclick = async () => {
-        if (!$("#fRepo", c).value.trim()) { setMsg(c, "Indique le dépôt à connecter.", "err"); $("#fRepo", c).focus(); return; }
-        busy(true); setMsg(c, "Connexion…");
-        try {
-          const d = await api("POST", "/api/settings", { mode: "github", ...vals() });
-          setMsg(c, `Connecté à ${d.repo}${d.seeded ? " (documents de départ créés)" : ""}. Rechargement…`, "ok");
-          setTimeout(() => location.reload(), 700);
-        } catch (e) { setMsg(c, e.message, "err"); busy(false); }
-      };
-      const dc = $('[data-act="disconnect"]', c);
-      if (dc) dc.onclick = () => confirmDisconnect(s);
-    },
-  });
+  box.innerHTML = `${card}
+    <p class="muted-sm">${gh ? "Pour passer à un autre dépôt, indique-le ci-dessous puis clique sur Connecter." : "Connecte un dépôt GitHub pour y enregistrer les fichiers (un commit par enregistrement)."}</p>
+    <div class="field"><label for="fRepo">${gh ? "Autre dépôt GitHub" : "Dépôt GitHub"}</label>
+      <input class="input" id="fRepo" placeholder="propriétaire/dépôt ou URL GitHub" value="" /></div>
+    <div class="field"><label for="fToken">Jeton d'accès</label>
+      <input class="input" id="fToken" type="password" autocomplete="off" placeholder="${s.hasToken ? "Laisser vide pour garder le jeton actuel" : "ghp_… ou github_pat_…"}" />
+      <span class="hint">Jeton avec accès en écriture au dépôt (classique : permission <code>repo</code> ; fin : Contents en lecture/écriture). <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">Créer un jeton</a></span></div>
+    <div class="field"><label for="fBranch">Branche <span style="color:var(--muted);font-weight:400">(facultatif)</span></label>
+      <input class="input" id="fBranch" placeholder="branche par défaut du dépôt" value="" /></div>
+    <div class="note">Les droits d'accès s'appliquent dans Easydoc. Sur GitHub, toute personne ayant accès au dépôt voit tous les fichiers.</div>
+    <div class="msg"></div>
+    <div class="row-end"><button class="btn" data-act="test">Tester</button><button class="btn btn-primary" data-act="save">Connecter</button></div>`;
+  const c = box;
+  const vals = () => ({ githubRepo: $("#fRepo", c).value, githubToken: $("#fToken", c).value, githubBranch: $("#fBranch", c).value });
+  const busy = (on) => $$(".row-end button", c).forEach((b) => { b.disabled = on; });
+  $('[data-act="test"]', c).onclick = async () => {
+    busy(true); setMsg(c, "Vérification…");
+    try {
+      const d = await api("POST", "/api/settings/test", vals());
+      setMsg(c, d.repo ? `Jeton valide (${d.login}). Dépôt ${d.repo.full_name} accessible en écriture, branche par défaut : ${d.repo.default_branch}.` : `Jeton valide (${d.login}).`, "ok");
+    } catch (e) { setMsg(c, e.message, "err"); }
+    busy(false);
+  };
+  $('[data-act="save"]', c).onclick = async () => {
+    if (!$("#fRepo", c).value.trim()) { setMsg(c, "Indique le dépôt à connecter.", "err"); $("#fRepo", c).focus(); return; }
+    busy(true); setMsg(c, "Connexion…");
+    try {
+      const d = await api("POST", "/api/settings", { mode: "github", ...vals() });
+      setMsg(c, `Connecté à ${d.repo}${d.seeded ? " (documents de départ créés)" : ""}. Rechargement…`, "ok");
+      setTimeout(() => location.reload(), 700);
+    } catch (e) { setMsg(c, e.message, "err"); busy(false); }
+  };
+  const dc = $('[data-act="disconnect"]', c);
+  if (dc) dc.onclick = () => confirmDisconnect(s);
 }
 
 /* ============================================================================================
@@ -936,9 +1280,10 @@ $("#btnUploadEmpty").onclick = pickFiles;
 $("#btnDelete").onclick = deleteDocument;
 $("#btnSave").onclick = () => saveNow(true);
 $("#btnSync").onclick = syncNow;
-$("#btnSettings").onclick = openSettings;
-$("#workspace").onclick = openSettings;
-$("#btnMe").onclick = () => askName(false);
+$("#btnSettings").onclick = () => openAdmin("users");
+$("#workspace").onclick = () => { if (isAdmin()) openAdmin("repo"); };
+$("#btnMe").onclick = openAccount;
+$("#btnAccess").onclick = () => openAdmin("access", { path: currentPath() || "" });
 $("#btnTheme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
 $("#scrim").onclick = () => $("#app").classList.remove("nav-open");
@@ -968,9 +1313,17 @@ function pathFromHash() {
   hydrateIcons();
   applyTheme(document.documentElement.dataset.theme);
   setView(localStorage.getItem("ed-view") || "edit");
-  renderMe();
-  if (!me.name) askName(true);
+  let state;
+  try { state = await api("GET", "/api/auth/state"); }
+  catch (e) { toast("Serveur injoignable : " + e.message, { error: true }); return; }
+  if (state.setupRequired) return showAuth("setup");
+  if (!state.user) return showAuth("login");
+  setMe(state.user);
+  for (const el of $$(".admin-only")) el.hidden = !isAdmin();
+  document.body.classList.remove("auth-mode");
+  connectSystem();
   await loadConfig();
+  if (isAdmin()) await loadRules();
   await refreshTree();
   const wanted = pathFromHash();
   const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files.find(isEditable) || files[0];

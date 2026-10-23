@@ -6,6 +6,9 @@
 #   bash easydoc-lxc.sh update [ctid]   met à jour Easydoc (code + dépendances + redémarrage)
 #   bash easydoc-lxc.sh status [ctid]   état et adresse
 #   bash easydoc-lxc.sh destroy [ctid]  supprime le conteneur (confirmation demandée)
+#   bash easydoc-lxc.sh users [ctid]    liste des comptes Easydoc
+#   bash easydoc-lxc.sh reset-password <identifiant> [ctid]
+#                                       nouveau mot de passe pour un compte (mot de passe oublié)
 #
 # Sans numéro, le conteneur Easydoc est retrouvé automatiquement.
 # EASYDOC_DRYRUN=1 : affiche les commandes Proxmox sans rien créer.
@@ -54,10 +57,13 @@ ct_port() { pct exec "$1" -- sh -c "sed -n 's/^PORT=//p' /opt/easydoc/.env 2>/de
 ct_ip() { pct exec "$1" -- hostname -I 2>/dev/null | awk '{print $1}'; }
 
 ACTION="${1:-create}"
-case "$ACTION" in create|update|status|destroy) ;; *) die "Action inconnue : $ACTION (create, update, status, destroy)";; esac
+case "$ACTION" in create|update|status|destroy|users|reset-password) ;;
+  *) die "Action inconnue : $ACTION (create, update, status, destroy, users, reset-password)";; esac
+
+if [ "$ACTION" = reset-password ]; then LOGIN="${2:-}"; CTARG="${3:-}"; else LOGIN=""; CTARG="${2:-}"; fi
 
 if [ "$ACTION" != create ]; then
-  CTID="${2:-$(find_ct)}"
+  CTID="${CTARG:-$(find_ct)}"
   [ -n "$CTID" ] || die "Conteneur Easydoc introuvable. Indiquez son numéro : bash $0 $ACTION <ctid>"
   pct status "$CTID" >/dev/null 2>&1 || die "Le conteneur $CTID n'existe pas."
   HN="$(pct config "$CTID" | sed -n 's/^hostname: *//p')"
@@ -77,6 +83,18 @@ if [ "$ACTION" != create ]; then
       run pct stop "$CTID" >/dev/null 2>&1 || true
       run pct destroy "$CTID" --purge
       ok "Conteneur $CTID supprimé."; exit 0;;
+    users|reset-password)
+      pct status "$CTID" | grep -q running || die "Le conteneur $CTID est arrêté : pct start $CTID"
+      pct exec "$CTID" -- test -f /opt/easydoc/cli.js || die "Version d'Easydoc trop ancienne : lancez d'abord « bash $0 update $CTID »."
+      if [ "$ACTION" = users ] || [ -z "$LOGIN" ]; then
+        echo "Comptes Easydoc du conteneur $CTID :"
+        pct exec "$CTID" -- sh -c 'cd /opt/easydoc && node cli.js users'
+        [ "$ACTION" = users ] && exit 0
+        echo; die "Indiquez l'identifiant : bash $0 reset-password <identifiant> [ctid]"
+      fi
+      [[ "$LOGIN" =~ ^[a-z0-9._-]+$ ]] || die "Identifiant invalide : $LOGIN"
+      pct exec "$CTID" -- sh -c 'cd /opt/easydoc && node cli.js reset-password "$1"' sh "$LOGIN"
+      exit 0;;
     update)
       pct status "$CTID" | grep -q running || { info "Démarrage du conteneur $CTID"; run pct start "$CTID"; sleep 3; }
       info "Mise à jour d'Easydoc dans le conteneur $CTID ($HN)";;
@@ -249,5 +267,6 @@ echo
 ok "${B}Easydoc est prêt : http://${IP}:${PORT}${N}"
 echo "   Conteneur $CTID ($HN) — console : pct enter $CTID"
 echo "   Mise à jour : bash $0 update    ·    État : bash $0 status"
-[ -z "$DRY" ] && [ "$ACTION" = create ] && msg "Easydoc est installé !\n\nOuvre : http://${IP}:${PORT}\n\nPuis connecte ton dépôt GitHub depuis Réglages (en bas à gauche)." 13 64
+echo "   Mot de passe oublié : bash $0 reset-password <identifiant>"
+[ -z "$DRY" ] && [ "$ACTION" = create ] && msg "Easydoc est installé !\n\nOuvre : http://${IP}:${PORT}\n\nLa première personne qui ouvre cette adresse crée le compte administrateur : fais-le tout de suite.\nEnsuite : comptes et droits d'accès, puis dépôt GitHub, depuis Administration (en bas à gauche)." 15 70
 exit 0

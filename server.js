@@ -24,6 +24,7 @@ const { RepoService } = require("./src/repo");
 const { SettingsStore } = require("./src/settings");
 const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths");
 const convert = require("./src/convert");
+const auth = require("./src/auth");
 const pkg = require("./package.json");
 
 const ENV_FILE = process.env.ENV_FILE || path.join(__dirname, ".env");
@@ -51,6 +52,50 @@ const repo = new RepoService({
   githubBranch: (fromFile ? settings.get().githubBranch : process.env.GITHUB_BRANCH) || "main",
   localRepoDir: LOCAL_DIR,
 });
+
+// ---- Comptes, sessions, droits ----------------------------------------------------------------
+const users = new auth.UserStore(path.join(DATA_DIR, "users.json"));
+const sessions = new auth.SessionStore(path.join(DATA_DIR, "sessions.json"));
+const access = new auth.AccessStore(path.join(DATA_DIR, "access.json"));
+const COOKIE = "easydoc_session";
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || "").split(";")) {
+    const i = part.indexOf("=");
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    try { if (k) out[k] = decodeURIComponent(part.slice(i + 1).trim()); } catch (_e) {}
+  }
+  return out;
+}
+const tokenOf = (req) => parseCookies(req.headers.cookie)[COOKIE];
+/** Compte de la requête (cookie de session valide, compte actif, mot de passe inchangé), sinon null. */
+function userFromReq(req) {
+  const token = tokenOf(req);
+  const s = sessions.get(token);
+  if (!s) return null;
+  const u = users.byId(s.userId);
+  if (!u || u.disabled || (u.epoch || 1) !== s.epoch) { sessions.destroy(token); return null; }
+  return u;
+}
+const isHttps = (req) => req.socket.encrypted || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+function setSessionCookie(req, res, token) {
+  const maxAge = Math.floor(auth.SESSION_TTL_MS / 1000);
+  res.setHeader("Set-Cookie", `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isHttps(req) ? "; Secure" : ""}`);
+}
+function clearSessionCookie(req, res) {
+  res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps(req) ? "; Secure" : ""}`);
+}
+/** Protection contre les requêtes venant d'un autre site (CSRF, détournement de WebSocket). */
+function sameOrigin(req) {
+  const o = req.headers.origin;
+  if (!o) return true; // pas un navigateur, ou requête de la même page sans en-tête Origin
+  let host;
+  try { host = new URL(o).host; } catch (_e) { return false; }
+  const fwd = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  return host === req.headers.host || (fwd && host === fwd);
+}
 
 // ---- État par document (survit à la destruction du Y.Doc en mémoire) -------------------------
 // name -> { lastCommitted, lastRemote, baseUpdate, dirty, firstDirty, timer, authors:Set, chain:Promise }
@@ -97,17 +142,26 @@ function bump(key) {
   d.transact(() => d.getMap("sys").set(key, Date.now()), SERVER);
 }
 
-function namesFromOrigin(doc, origin) {
-  const ids = doc.conns && doc.conns.get(origin);
-  const out = [];
-  if (ids) {
-    for (const id of ids) {
-      const s = doc.awareness.getStates().get(id);
-      if (s && s.user && s.user.name) out.push(String(s.user.name).slice(0, 40));
+/** Auteur d'une modification temps réel : le compte de la connexion (non falsifiable). */
+function namesFromOrigin(_doc, origin) {
+  const u = origin && origin.edUserId ? users.byId(origin.edUserId) : null;
+  return u ? [u.displayName] : [];
+}
+
+/**
+ * Applique les changements de comptes et de droits aux connexions ouvertes :
+ * compte supprimé / désactivé / mot de passe changé → déconnexion ; accès retiré → document fermé.
+ */
+function enforceAccess() {
+  for (const [name, doc] of [...yws.docs.entries()]) {
+    for (const conn of [...doc.conns.keys()]) {
+      const u = users.byId(conn.edUserId);
+      if (!u || u.disabled || (u.epoch || 1) !== conn.edEpoch) { try { conn.close(4001, "session terminée"); } catch (_e) {} continue; }
+      if (name !== SYSTEM_DOC && !access.can(u, name, "read")) { try { conn.close(4003, "accès retiré"); } catch (_e) {} }
     }
   }
-  return out;
 }
+setInterval(enforceAccess, 5000).unref(); // prend aussi en compte les changements faits en ligne de commande
 
 // ---- Enregistrement (commit) --------------------------------------------------------------------
 function scheduleSave(name) {
@@ -323,14 +377,160 @@ app.use(express.json({ limit: "5mb" }));
 app.use(express.static(PUBLIC, { maxAge: 0, etag: true }));
 
 const bad = (res, code, error) => {
+  if (res.headersSent) return;
   // jeton GitHub expiré / révoqué : message actionnable plutôt qu'une erreur technique
   if (/Bad credentials|Requires authentication/i.test(String(error))) {
-    return res.status(502).json({ ok: false, error: "GitHub refuse le jeton d'accès (expiré ou révoqué). Ouvre Réglages pour en saisir un nouveau ou déconnecter le dépôt." });
+    return res.status(502).json({ ok: false, error: "GitHub refuse le jeton d'accès (expiré ou révoqué). Un administrateur peut en saisir un nouveau (Administration → Dépôt) ou déconnecter le dépôt." });
   }
   return res.status(code).json({ ok: false, error });
 };
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, mode: repo.mode, version: pkg.version }));
+
+// Authentification : toute l'API exige une session, sauf ces routes.
+const PUBLIC_API = new Set(["/api/health", "/api/auth/state", "/api/auth/login", "/api/auth/setup"]);
+app.use("/api", (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD" && !sameOrigin(req)) return bad(res, 403, "Requête refusée (origine différente).");
+  req.user = userFromReq(req);
+  if (PUBLIC_API.has(req.originalUrl.split("?")[0])) return next();
+  if (!req.user) return bad(res, 401, "Session expirée : reconnecte-toi.");
+  next();
+});
+const adminOnly = (req, res, next) => (req.user && req.user.role === "admin" ? next() : bad(res, 403, "Réservé aux administrateurs."));
+/** Vérifie un droit ; un fichier masqué répond « introuvable » (on ne révèle pas son existence). */
+function allow(req, res, p, need) {
+  const lvl = access.level(req.user, p);
+  if (auth.RANK[lvl] >= auth.RANK[need]) return true;
+  if (lvl === "none") bad(res, 404, "Fichier introuvable.");
+  else bad(res, 403, "Tu as un accès en lecture seule ici : modification impossible.");
+  return false;
+}
+const errStatus = (e, fallback = 400) => (e && e.status) || fallback;
+
+// ---- Comptes ------------------------------------------------------------------------------------
+const loginFails = new Map(); // ip → { n, until }
+const clientIp = (req) => req.socket.remoteAddress || "?";
+function tooManyFails(ip) { const a = loginFails.get(ip); return !!(a && a.until > Date.now() && a.n >= 8); }
+function noteFail(ip) {
+  let a = loginFails.get(ip);
+  if (!a || a.until < Date.now()) a = { n: 0, until: Date.now() + 15 * 60 * 1000 };
+  a.n++;
+  loginFails.set(ip, a);
+}
+
+app.get("/api/auth/state", (req, res) => res.json({
+  ok: true, setupRequired: users.count() === 0, user: req.user ? auth.publicUser(req.user) : null,
+}));
+
+// Premier démarrage : création du compte administrateur (possible une seule fois).
+app.post("/api/auth/setup", async (req, res) => {
+  if (users.count() > 0) return bad(res, 409, "Le compte administrateur existe déjà.");
+  try {
+    const u = await users.create({ ...req.body, role: "admin", groups: [] }, { onlyIfEmpty: true });
+    setSessionCookie(req, res, sessions.create(u));
+    console.log(`[auth] compte administrateur créé : ${u.username}`);
+    res.json({ ok: true, user: auth.publicUser(u) });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const ip = clientIp(req);
+  if (tooManyFails(ip)) return bad(res, 429, "Trop de tentatives : réessaie dans quelques minutes.");
+  const u = users.byUsername(req.body.username);
+  const ok = await auth.verifyPassword(String(req.body.password || ""), u && u.hash);
+  if (!u || !ok) { noteFail(ip); return bad(res, 401, "Identifiant ou mot de passe incorrect."); }
+  if (u.disabled) return bad(res, 403, "Ce compte est désactivé. Contacte un administrateur.");
+  loginFails.delete(ip);
+  setSessionCookie(req, res, sessions.create(u));
+  res.json({ ok: true, user: auth.publicUser(u) });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  sessions.destroy(tokenOf(req));
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
+app.post("/api/auth/profile", async (req, res) => {
+  try {
+    const u = await users.update(req.user.id, { displayName: req.body.displayName });
+    res.json({ ok: true, user: auth.publicUser(u) });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+app.post("/api/auth/password", async (req, res) => {
+  try {
+    if (!(await auth.verifyPassword(String(req.body.current || ""), req.user.hash))) return bad(res, 400, "Mot de passe actuel incorrect.");
+    const u = await users.update(req.user.id, { password: req.body.next });
+    setSessionCookie(req, res, sessions.create(u)); // les autres sessions de ce compte sont fermées
+    enforceAccess();
+    res.json({ ok: true });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+// ---- Administration des comptes -------------------------------------------------------------------
+app.get("/api/admin/users", adminOnly, (_req, res) => res.json({ ok: true, users: users.all().map(auth.publicUser), groups: users.groups() }));
+
+app.post("/api/admin/users", adminOnly, async (req, res) => {
+  try {
+    const u = await users.create(req.body);
+    res.json({ ok: true, user: auth.publicUser(u) });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+app.patch("/api/admin/users/:id", adminOnly, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (req.params.id === req.user.id && b.disabled) return bad(res, 409, "Tu ne peux pas désactiver ton propre compte.");
+    const u = await users.update(req.params.id, {
+      displayName: b.displayName, groups: b.groups, role: b.role, disabled: b.disabled, password: b.password || undefined,
+    });
+    enforceAccess();
+    bump("treeVersion"); // les listes de fichiers visibles peuvent changer (rôle, groupes)
+    res.json({ ok: true, user: auth.publicUser(u) });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+app.delete("/api/admin/users/:id", adminOnly, (req, res) => {
+  try {
+    if (req.params.id === req.user.id) return bad(res, 409, "Tu ne peux pas supprimer ton propre compte.");
+    const u = users.remove(req.params.id);
+    sessions.destroyUser(u.id);
+    access.removeUser(u.username);
+    enforceAccess();
+    res.json({ ok: true });
+  } catch (e) { bad(res, errStatus(e), e.message); }
+});
+
+// ---- Administration des droits d'accès ------------------------------------------------------------
+const rulePath = (v) => {
+  const s = String(v == null ? "" : v).trim().replace(/^\/+|\/+$/g, "");
+  return s === "" ? "" : safeFilePath(s);
+};
+const effective = (p) => users.all().map((u) => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role, disabled: !!u.disabled, level: access.level(u, p) }));
+
+app.get("/api/admin/access", adminOnly, (_req, res) => {
+  const groups = new Map();
+  for (const g of [...users.groups(), ...access.groups()]) groups.set(g.toLowerCase(), g);
+  res.json({ ok: true, rules: access.rules, groups: [...groups.values()].sort((a, b) => a.localeCompare(b, "fr")), users: users.all().map(auth.publicUser) });
+});
+
+app.get("/api/admin/access/effective", adminOnly, (req, res) => {
+  const p = rulePath(req.query.path);
+  if (p === null) return bad(res, 400, "Chemin invalide.");
+  res.json({ ok: true, path: p, users: effective(p) });
+});
+
+app.put("/api/admin/access", adminOnly, (req, res) => {
+  const p = rulePath(req.body.path);
+  if (p === null) return bad(res, 400, "Chemin invalide.");
+  try {
+    access.setRule(p, req.body.entries);
+    enforceAccess();
+    bump("treeVersion");
+    res.json({ ok: true, path: p, rule: access.rules[p] || null, users: effective(p) });
+  } catch (e) { bad(res, 400, e.message); }
+});
 
 app.get("/api/config", (_req, res) => res.json({
   mode: repo.mode,
@@ -342,8 +542,15 @@ app.get("/api/config", (_req, res) => res.json({
   maxUploadMB: MAX_UPLOAD_MB,
 }));
 
-app.get("/api/files", async (_req, res) => {
-  try { res.json({ ok: true, files: (await repo.listFiles()).map((f) => ({ ...f, kind: kindOf(f.path) })) }); }
+app.get("/api/files", async (req, res) => {
+  try {
+    const out = [];
+    for (const f of await repo.listFiles()) {
+      const level = access.level(req.user, f.path);
+      if (level !== "none") out.push({ ...f, kind: kindOf(f.path), access: level });
+    }
+    res.json({ ok: true, files: out, role: req.user.role });
+  }
   catch (e) { bad(res, 500, e.message); }
 });
 
@@ -352,6 +559,7 @@ const INLINE_KINDS = new Set(["pdf", "image"]);
 app.get("/api/raw", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
   try {
     let buf;
     const live = isEditable(p) ? yws.docs.get(p) : null;
@@ -379,10 +587,12 @@ app.get("/api/raw", async (req, res) => {
 app.post("/api/upload", express.raw({ type: () => true, limit: MAX_UPLOAD_MB * 1024 * 1024 }), async (req, res) => {
   const wanted = safeFilePath(String(req.query.path || ""));
   if (!wanted) return bad(res, 400, "Nom de fichier non pris en charge.");
-  const author = String(req.query.author || "").slice(0, 40);
+  if (!allow(req, res, wanted, "write")) return;
+  const author = req.user.displayName;
   const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
   try {
     const target = req.query.replace === "1" ? wanted : await uniquePath(wanted);
+    if (target !== wanted && !allow(req, res, target, "write")) return;
     const live = isEditable(target) ? yws.docs.get(target) : null;
     if (live && live.getMap("meta").get("loaded")) {
       live.transact(() => applyDiff(live.getText(TEXT), buf.toString("utf8")), "upload");
@@ -399,6 +609,7 @@ app.post("/api/upload", express.raw({ type: () => true, limit: MAX_UPLOAD_MB * 1
 app.get("/api/preview", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
   if (!p || kindOf(p) !== "docx") return bad(res, 400, "Aperçu disponible uniquement pour les fichiers Word (.docx).");
+  if (!allow(req, res, p, "read")) return;
   try {
     const f = await repo.readRaw(p);
     if (!f) return bad(res, 404, "Fichier introuvable.");
@@ -411,13 +622,15 @@ app.post("/api/convert", async (req, res) => {
   const p = safeFilePath(String(req.body.path || ""));
   const kind = p && kindOf(p);
   if (!p || (kind !== "docx" && kind !== "pdf")) return bad(res, 400, "Conversion possible uniquement pour les fichiers Word (.docx) et PDF.");
-  const author = String(req.body.author || "").slice(0, 40);
+  if (!allow(req, res, p, "read")) return;
+  const author = req.user.displayName;
   try {
     const f = await repo.readRaw(p);
     if (!f) return bad(res, 404, "Fichier introuvable.");
     const dir = dirOf(p);
     const stem = path.posix.basename(p).replace(/\.[^.]+$/, "");
     const target = await uniquePath(joinPath(dir, `${stem}.md`));
+    if (!access.can(req.user, target, "write")) return bad(res, 403, "Tu n'as pas le droit d'ajouter des documents dans ce dossier.");
     const targetStem = path.posix.basename(target).replace(/\.md$/i, "");
     let markdown, images = 0;
     if (kind === "docx") {
@@ -444,6 +657,7 @@ app.post("/api/convert", async (req, res) => {
 app.get("/api/file", async (req, res) => {
   const p = safeDocPath(String(req.query.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
   try {
     const live = yws.docs.get(p);
     if (live && live.getMap("meta").get("loaded")) return res.json({ ok: true, path: p, exists: true, content: live.getText(TEXT).toString() });
@@ -456,7 +670,8 @@ app.get("/api/file", async (req, res) => {
 app.post("/api/save", async (req, res) => {
   const p = safeDocPath(String(req.body.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
-  const author = String(req.body.author || "").slice(0, 40);
+  if (!allow(req, res, p, "write")) return;
+  const author = req.user.displayName;
   try {
     const doc = yws.docs.get(p);
     if (typeof req.body.content === "string") {
@@ -487,11 +702,12 @@ app.post("/api/create", async (req, res) => {
   if (raw && !/\.(md|markdown|txt)$/i.test(raw)) raw += ".md";
   const p = safeDocPath(raw);
   if (!p) return bad(res, 400, "Nom invalide : lettres, chiffres, espaces, - et _ ; dossiers séparés par /.");
+  if (!access.can(req.user, p, "write")) return bad(res, 403, "Tu n'as pas le droit de créer un document à cet endroit.");
   try {
     if (await repo.readRaw(p)) return bad(res, 409, "Un document porte déjà ce nom.");
     const title = path.posix.basename(p).replace(/\.[^.]+$/, "");
     const initial = /\.txt$/i.test(p) ? "" : `# ${title}\n\n`;
-    await serialize(p, () => repo.writeFile(p, initial, `Easydoc : création de ${p}`));
+    await serialize(p, () => repo.writeFile(p, initial, `Easydoc : création de ${p} (${req.user.displayName})`));
     bump("treeVersion");
     res.json({ ok: true, path: p });
   } catch (e) { bad(res, 500, e.message); }
@@ -500,11 +716,12 @@ app.post("/api/create", async (req, res) => {
 app.delete("/api/file", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "write")) return;
   try {
     const doc = isEditable(p) ? yws.docs.get(p) : null;
     const s = st(p);
     clearTimeout(s.timer); s.dirty = false;
-    const r = await serialize(p, () => repo.deleteFile(p, `Easydoc : suppression de ${p}`));
+    const r = await serialize(p, () => repo.deleteFile(p, `Easydoc : suppression de ${p} (${req.user.displayName})`));
     if (doc) {
       doc.transact(() => doc.getMap("meta").set("deleted", Date.now()), SERVER);
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
@@ -540,7 +757,7 @@ async function testGithub(token, repoName) {
   return { login: me.data.login, repo: info };
 }
 
-app.get("/api/settings", (_req, res) => res.json({
+app.get("/api/settings", adminOnly, (_req, res) => res.json({
   ok: true,
   mode: repo.mode,
   repo: repo.mode === "github" ? repo.options.githubRepo : null,
@@ -549,7 +766,7 @@ app.get("/api/settings", (_req, res) => res.json({
   hasToken: !!repo.options.githubToken,
 }));
 
-app.post("/api/settings/test", async (req, res) => {
+app.post("/api/settings/test", adminOnly, async (req, res) => {
   const token = String(req.body.githubToken || "").trim() || repo.options.githubToken || "";
   const name = cleanRepo(req.body.githubRepo);
   if (!token) return bad(res, 400, "Jeton GitHub requis.");
@@ -558,7 +775,7 @@ app.post("/api/settings/test", async (req, res) => {
   catch (e) { bad(res, 400, e.message); }
 });
 
-app.post("/api/settings", async (req, res) => {
+app.post("/api/settings", adminOnly, async (req, res) => {
   try {
     if (req.body.mode === "local") {
       // déconnexion complète : jeton et dépôt effacés du serveur (config + .env).
@@ -602,8 +819,40 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  const user = userFromReq(req);
+  if (!user || !sameOrigin(req)) {
+    socket.write(`HTTP/1.1 ${user ? "403 Forbidden" : "401 Unauthorized"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.edUserId = user.id;
+    ws.edEpoch = user.epoch || 1;
+    wss.emit("connection", ws, req);
+  });
 });
+
+/**
+ * Filtre les messages entrants selon les droits : la présence (awareness) et la demande d'état
+ * (sync step 1) sont toujours admises ; les modifications (sync step 2 / update) seulement avec
+ * le droit d'écriture. Personne n'écrit dans le canal système.
+ */
+function guardIncoming(conn, name) {
+  const on = conn.on.bind(conn);
+  conn.on = (event, fn) => {
+    if (event !== "message") return on(event, fn);
+    return on("message", (data, isBinary) => {
+      const u8 = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer || data, data.byteOffset || 0, data.byteLength);
+      if (u8.length < 2 && u8[0] !== 1) return;
+      if (u8[0] === 1) return fn(data, isBinary);                 // présence
+      if (u8[0] !== 0) return;                                     // type inconnu
+      if (u8[1] === 0) return fn(data, isBinary);                  // demande d'état
+      if (name === SYSTEM_DOC) return;
+      const u = users.byId(conn.edUserId);
+      if (u && !u.disabled && access.can(u, name, "write")) fn(data, isBinary);
+    });
+  };
+}
 
 wss.on("connection", (conn, req) => {
   let name;
@@ -611,12 +860,15 @@ wss.on("connection", (conn, req) => {
   catch (_e) { name = ""; }
   if (name !== SYSTEM_DOC) name = safeDocPath(name);
   if (!name) { conn.close(1008, "document invalide"); return; }
+  if (name !== SYSTEM_DOC && !access.can(users.byId(conn.edUserId), name, "read")) { conn.close(4003, "accès refusé"); return; }
+  guardIncoming(conn, name);
   yws.setupWSConnection(conn, req, { gc: true, docName: name });
 });
 
 async function shutdown(sig) {
   console.log(`${sig} reçu : enregistrement des documents ouverts…`);
   try { await Promise.race([flushAll(), new Promise((r) => setTimeout(r, 8000))]); } catch (_e) {}
+  sessions.flush();
   process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -626,6 +878,7 @@ async function main() {
   await repo.init();
   try { await repo.seedIfEmpty(); } catch (e) { console.error("[seed]", e.message); }
   try { lastHead = await repo.headSha(); } catch (_e) {}
+  if (!users.count()) console.log("[auth] aucun compte : le premier visiteur crée le compte administrateur.");
   server.listen(PORT, () => {
     console.log(`Easydoc ${pkg.version} — http://localhost:${PORT} — ${repo.mode === "github"
       ? `GitHub ${repo.options.githubRepo} (${repo.options.githubBranch})` : `local ${LOCAL_DIR}`}`);

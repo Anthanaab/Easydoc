@@ -16,7 +16,7 @@
   </script>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="auth-mode">
   <div class="app" id="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
@@ -45,12 +45,12 @@
       <nav class="tree" id="tree" aria-label="Documents"></nav>
 
       <div class="side-foot">
-        <button class="me" id="btnMe" title="Changer mon nom">
+        <button class="me" id="btnMe" title="Mon compte">
           <span class="avatar" id="meAvatar"></span><span class="me-name" id="meName"></span>
         </button>
         <div class="side-foot-actions">
           <button class="icon-btn" id="btnTheme" title="Thème clair / sombre"><span data-icon="moon"></span></button>
-          <button class="icon-btn" id="btnSettings" title="Réglages du dépôt"><span data-icon="settings"></span></button>
+          <button class="icon-btn admin-only" id="btnSettings" title="Administration : utilisateurs, droits d'accès, dépôt" hidden><span data-icon="settings"></span></button>
         </div>
       </div>
     </aside>
@@ -68,6 +68,7 @@
           <button data-view="split" title="Côte à côte"><span data-icon="columns"></span><span class="lbl">Côte à côte</span></button>
           <button data-view="preview" title="Aperçu"><span data-icon="eye"></span><span class="lbl">Aperçu</span></button>
         </div>
+        <button class="icon-btn" id="btnAccess" title="Qui peut voir ou modifier ce fichier" hidden><span data-icon="lock"></span></button>
         <button class="icon-btn" id="btnSync" title="Récupérer les modifications du dépôt"><span data-icon="refresh"></span></button>
         <button class="icon-btn" id="btnDelete" title="Supprimer ce document"><span data-icon="trash"></span></button>
         <button class="btn btn-primary" id="btnSave" title="Enregistrer maintenant (Ctrl+S)"><span data-icon="check"></span><span class="lbl">Enregistrer</span></button>

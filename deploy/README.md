@@ -8,7 +8,7 @@ Deux scripts :
 | `provision.sh` | **dans le conteneur** (root) | installe Node.js, le code, les dépendances et le service systemd ; sert aussi aux mises à jour |
 
 Aucun jeton n'est demandé : une fois installé, ouvre l'adresse affichée et connecte ton dépôt
-GitHub depuis **Réglages** (en bas à gauche de l'interface).
+GitHub depuis **Administration → Dépôt** (en bas à gauche de l'interface), après avoir créé le compte administrateur.
 
 ## Installer
 
@@ -32,11 +32,16 @@ Un récapitulatif est affiché avant toute création. À la fin, le script affic
 bash easydoc-lxc.sh update     # met à jour : code, dépendances, redémarrage du service
 bash easydoc-lxc.sh status     # état du conteneur et adresse
 bash easydoc-lxc.sh destroy    # supprime le conteneur (confirmation demandée)
+bash easydoc-lxc.sh users      # liste des comptes Easydoc
+bash easydoc-lxc.sh reset-password camille   # mot de passe oublié : en affiche un nouveau
 ```
+
+**Premier accès** : la première personne qui ouvre l'adresse crée le compte administrateur.
+Fais-le juste après l'installation (ou la mise à jour vers la 0.4).
 
 Le conteneur est retrouvé automatiquement ; s'il y en a plusieurs, indique son numéro :
 `bash easydoc-lxc.sh update 115`. La mise à jour conserve la configuration (dépôt connecté,
-jeton, documents du dépôt local).
+jeton, comptes, droits, documents du dépôt local).
 
 Options : `EASYDOC_DRYRUN=1` (simulation, rien n'est créé), `EASYDOC_PORT=8080` (autre port),
 `EASYDOC_DOCS_REPO=moi/docs EASYDOC_TOKEN=…` (préconfigurer un dépôt de documents).
