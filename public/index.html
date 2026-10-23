@@ -68,6 +68,8 @@
           <button data-view="split" title="Côte à côte"><span data-icon="columns"></span><span class="lbl">Côte à côte</span></button>
           <button data-view="preview" title="Aperçu"><span data-icon="eye"></span><span class="lbl">Aperçu</span></button>
         </div>
+        <button class="icon-btn" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
+        <button class="icon-btn" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
         <button class="icon-btn" id="btnAccess" title="Qui peut voir ou modifier ce fichier" hidden><span data-icon="lock"></span></button>
         <button class="icon-btn" id="btnSync" title="Récupérer les modifications du dépôt"><span data-icon="refresh"></span></button>
         <button class="icon-btn" id="btnDelete" title="Supprimer ce document"><span data-icon="trash"></span></button>
@@ -85,6 +87,8 @@
           </div>
         </div>
         <div class="pane pane-editor" id="paneEditor">
+          <div class="authors-bar" id="authorsBar" hidden></div>
+          <div class="overlay" id="overlay" aria-hidden="true"></div>
           <textarea id="editor" spellcheck="true" placeholder="Commence à écrire… (Markdown)" aria-label="Contenu du document"></textarea>
         </div>
         <div class="pane pane-preview" id="panePreview">
@@ -95,6 +99,7 @@
     </main>
   </div>
 
+  <div class="auth-tip" id="authTip" hidden></div>
   <div class="dropzone" id="dropzone" aria-hidden="true">
     <div class="dropzone-card"><span data-icon="upload"></span><div id="dropzoneText">Dépose tes fichiers pour les importer</div></div>
   </div>

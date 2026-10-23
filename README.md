@@ -11,7 +11,13 @@ en train d'être tapé.
 ## Fonctionnalités
 
 - **Édition à plusieurs en temps réel** (CRDT Yjs) : aucune frappe perdue, le curseur reste en place.
-- **Présence** : qui est connecté, sur quel document, à quelle ligne.
+- **Présence** : qui est connecté, sur quel document ; **curseur et sélection de chacun** dans le
+  texte, avec son nom, en direct.
+- **Qui a écrit quoi** (bouton surligneur) : chaque passage est coloré selon son auteur, avec la
+  part de chacun et, au survol, le nom et la date. Les modifications de **Claude** (commits avec
+  `Co-Authored-By: Claude`, ajouté par défaut par Claude Code) apparaissent sous son nom.
+- **Historique** : chaque enregistrement d'un fichier, avec son auteur et le détail des lignes
+  ajoutées ou supprimées.
 - **Enregistrement automatique** quelques secondes après la dernière frappe : un seul commit
   pour tous les participants, avec leurs noms dans le message. `Ctrl+S` enregistre tout de suite.
 - **Modifications externes** (agent IA, `git push`, autre outil) détectées toutes les 20 s
@@ -76,6 +82,22 @@ modifications*). En dépôt local, l'agent peut modifier directement les fichier
   }
   ```
 
+## Qui a écrit quoi
+
+- Chaque caractère tapé dans Easydoc est attribué **par le serveur** au compte connecté (impossible
+  à usurper), avec la date. L'attribution est conservée dans `data/authorship/` (hors du dépôt).
+- Le texte modifié par un commit extérieur (Claude, `git push`, autre outil) est attribué à
+  l'auteur du commit — **seulement le passage modifié**, pas tout le paragraphe.
+- Commits reconnus comme **Claude** : auteur « Claude », adresse `@anthropic.com`, ou ligne
+  `Co-Authored-By: Claude …` dans le message (Claude Code l'ajoute par défaut ; le `CLAUDE.md`
+  créé par Easydoc demande de la garder). Les autres commits sont attribués à leur auteur git,
+  rattaché au compte Easydoc du même identifiant ou du même nom s'il existe.
+- Documents existants : à la première ouverture, l'attribution est reconstituée ligne par ligne
+  à partir de l'historique git (*blame*).
+- Les modifications faites hors d'Easydoc pendant qu'un document est fermé sont attribuées à
+  l'auteur du dernier commit du fichier. Une modification du dépôt local sans commit est
+  marquée « Modification externe ».
+
 ## Comptes et droits d'accès
 
 - **Rôles** : *administrateur* (voit et modifie tout, gère les comptes, les droits et le dépôt)
@@ -121,7 +143,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `PORT` | `3000` | Port HTTP |
-| `DATA_DIR` | `./data` | Configuration, comptes, sessions, droits et dépôt local |
+| `DATA_DIR` | `./data` | Configuration, comptes, sessions, droits, auteurs et dépôt local |
 | `LOCAL_REPO_DIR` | `$DATA_DIR/localrepo` | Dépôt git local (mode sans GitHub) |
 | `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
 | `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
@@ -134,6 +156,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `src/repo.js` — accès au dépôt (API GitHub ou git local) · `src/paths.js` — validation des chemins
 - `src/convert.js` — aperçu et conversion des fichiers Word et PDF
 - `src/auth.js` — comptes, sessions, droits d'accès · `cli.js` — administration en ligne de commande
+- `src/authorship.js` — attribution des auteurs (marquage Yjs, diff, blame, fichiers annexes)
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
   DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.

@@ -25,6 +25,7 @@ const { SettingsStore } = require("./src/settings");
 const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths");
 const convert = require("./src/convert");
 const auth = require("./src/auth");
+const authorship = require("./src/authorship");
 const pkg = require("./package.json");
 
 const ENV_FILE = process.env.ENV_FILE || path.join(__dirname, ".env");
@@ -41,6 +42,7 @@ const POLL_MS = Number(process.env.POLL_MS || 20000);           // détection de
 const SYSTEM_DOC = "__system__";
 const SERVER = "easydoc-server";                                // origine des transactions du serveur
 const TEXT = "content";
+const ATTR = "easydoc-authorship";                              // origine des marquages d'auteur
 
 // ---- Configuration (connectée depuis l'interface ; .env = valeurs initiales) -----------------
 const settings = new SettingsStore(path.join(DATA_DIR, "config.json"));
@@ -95,6 +97,31 @@ function sameOrigin(req) {
   try { host = new URL(o).host; } catch (_e) { return false; }
   const fwd = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
   return host === req.headers.host || (fwd && host === fwd);
+}
+
+// ---- Auteurs (qui a écrit quoi) ----------------------------------------------------------------
+const authorStore = new authorship.AuthorshipStore(path.join(DATA_DIR, "authorship"));
+const repoKey = () => (repo.mode === "github" ? `github:${repo.options.githubRepo}@${repo.options.githubBranch}` : "local");
+const keyOfCommit = (c) => authorship.keyFromCommit(c, users);
+const keyOfUser = (u) => `u:${u.username}`;
+const userAttrs = (u) => ({ a: keyOfUser(u), t: authorship.nowMin() });
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_r, rej) => setTimeout(() => rej(new Error("délai dépassé")), ms))]);
+
+/** Attribution initiale d'un document : fichier annexe, sinon historique git (blame). */
+async function initialSegments(name, content) {
+  const saved = authorStore.load(repoKey(), name);
+  if (saved && saved.text === content) return authorship.segmentsFrom(content, saved.runs);
+  if (saved) {
+    // modifié pendant que le document était fermé (agent IA, push…) : on attribue la différence
+    let who = { a: "", t: authorship.nowMin() };
+    try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
+    return authorship.reconcile(saved.text, saved.runs, content, who);
+  }
+  try {
+    const ranges = await withTimeout(repo.blame(name), 10000);
+    if (ranges.length) return authorship.segmentsFromBlame(content, ranges, keyOfCommit);
+  } catch (e) { console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`); }
+  return [{ text: content, a: "", t: 0 }];
 }
 
 // ---- État par document (survit à la destruction du Y.Doc en mémoire) -------------------------
@@ -183,6 +210,8 @@ function commitDoc(name, extraAuthor, docArg) {
     if (!meta.get("loaded")) return { committed: false };
     const content = doc.getText(TEXT).toString();
     const snapshot = Y.encodeStateAsUpdate(doc); // état exact correspondant à `content`
+    const runs = authorship.runsFromYText(doc.getText(TEXT));
+    const rk = repoKey();
     if (extraAuthor) s.authors.add(String(extraAuthor).slice(0, 40));
     if (content === s.lastCommitted) {
       s.dirty = false; s.firstDirty = 0; s.authors.clear();
@@ -193,6 +222,7 @@ function commitDoc(name, extraAuthor, docArg) {
     const msg = `Easydoc : ${name} (${authors.length ? authors.join(", ") : "modification"})`;
     try {
       const r = await repo.writeFile(name, content, msg);
+      authorStore.save(rk, name, content, runs);
       s.lastCommitted = content;
       s.lastRemote = content;
       s.baseUpdate = snapshot;
@@ -232,12 +262,14 @@ yws.setPersistence({
     try {
       const file = await repo.readFile(name);
       const content = file ? file.content : "";
+      const segs = content ? await initialSegments(name, content) : [];
       doc.transact(() => {
         const t = doc.getText(TEXT);
-        if (t.length === 0 && content) t.insert(0, content);
+        if (t.length === 0 && content) authorship.insertSegments(t, segs);
         meta.set("loaded", true);
         meta.set("exists", !!file);
       }, SERVER);
+      if (content) authorStore.save(repoKey(), name, content, authorship.runsFromYText(doc.getText(TEXT)));
       s.lastCommitted = file ? content : null;
       s.lastRemote = s.lastCommitted;
       s.baseUpdate = Y.encodeStateAsUpdate(doc);
@@ -246,8 +278,25 @@ yws.setPersistence({
       console.error(`[load] ${name} : ${e.message}`);
       doc.transact(() => meta.set("loadError", String(e.message).slice(0, 200)), SERVER);
     }
+    // Texte tapé dans un navigateur : marqué au nom du compte de la connexion.
+    const ytext = doc.getText(TEXT);
+    ytext.observe((ev) => {
+      const origin = ev.transaction.origin;
+      if (!origin || !origin.edUserId) return;
+      const u = users.byId(origin.edUserId);
+      if (!u) return;
+      const ranges = [];
+      let i = 0;
+      for (const op of ev.delta) {
+        if (op.retain) i += op.retain;
+        else if (typeof op.insert === "string") { ranges.push([i, op.insert.length]); i += op.insert.length; }
+      }
+      if (!ranges.length) return;
+      const attrs = userAttrs(u);
+      doc.transact(() => { for (const [at, len] of ranges) ytext.format(at, len, attrs); }, ATTR);
+    });
     doc.on("update", (_u, origin) => {
-      if (origin === SERVER || !meta.get("loaded")) return;
+      if (origin === SERVER || origin === ATTR || !meta.get("loaded")) return;
       const s2 = st(name);
       for (const n of namesFromOrigin(doc, origin)) s2.authors.add(n);
       if (!s2.dirty) { s2.dirty = true; s2.firstDirty = Date.now(); }
@@ -290,10 +339,12 @@ async function pollExternal(force = false) {
         if (file.content === s.lastRemote) return; // rien de nouveau
         // base = dernier état connu du dépôt ; on applique base→distant sur une copie,
         // puis on fusionne cette copie dans le document vivant (CRDT : la saisie en cours est préservée)
+        let who = { a: "", t: authorship.nowMin() };
+        try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
         const tmp = new Y.Doc();
         if (s.baseUpdate) Y.applyUpdate(tmp, s.baseUpdate);
         const before = Y.encodeStateVector(tmp);
-        tmp.transact(() => applyDiff(tmp.getText(TEXT), file.content));
+        tmp.transact(() => authorship.applyFineDiff(tmp.getText(TEXT), file.content, who.a ? { a: who.a, t: who.t } : {}));
         const delta = Y.encodeStateAsUpdate(tmp, before);
         Y.applyUpdate(doc, delta, SERVER);
         tmp.destroy();
@@ -303,7 +354,11 @@ async function pollExternal(force = false) {
         if (doc.getText(TEXT).toString() !== file.content) { // il reste de la saisie locale à enregistrer
           s.dirty = true; s.firstDirty = s.firstDirty || Date.now(); scheduleSave(name);
         }
-        doc.transact(() => doc.getMap("meta").set("externalAt", Date.now()), SERVER);
+        doc.transact(() => {
+          doc.getMap("meta").set("externalBy", authorship.nameOfKey(who.a, users) || "");
+          doc.getMap("meta").set("externalAt", Date.now());
+        }, SERVER);
+        authorStore.save(repoKey(), name, doc.getText(TEXT).toString(), authorship.runsFromYText(doc.getText(TEXT)));
         changed++;
       });
     } catch (e) {
@@ -595,7 +650,7 @@ app.post("/api/upload", express.raw({ type: () => true, limit: MAX_UPLOAD_MB * 1
     if (target !== wanted && !allow(req, res, target, "write")) return;
     const live = isEditable(target) ? yws.docs.get(target) : null;
     if (live && live.getMap("meta").get("loaded")) {
-      live.transact(() => applyDiff(live.getText(TEXT), buf.toString("utf8")), "upload");
+      live.transact(() => authorship.applyFineDiff(live.getText(TEXT), buf.toString("utf8"), userAttrs(req.user)), "upload");
       await commitDoc(target, author);
     } else {
       await serialize(target, () => repo.writeFile(target, buf, `Easydoc : import de ${target}${author ? ` (${author})` : ""}`));
@@ -677,7 +732,7 @@ app.post("/api/save", async (req, res) => {
     if (typeof req.body.content === "string") {
       const content = req.body.content;
       if (doc && doc.getMap("meta").get("loaded")) {
-        doc.transact(() => applyDiff(doc.getText(TEXT), content), "offline-client");
+        doc.transact(() => authorship.applyFineDiff(doc.getText(TEXT), content, userAttrs(req.user)), "offline-client");
       } else {
         const r = await serialize(p, () => repo.writeFile(p, content, `Easydoc : ${p} (${author || "modification"})`));
         return res.json({ ok: true, committed: r.committed });
@@ -687,6 +742,37 @@ app.post("/api/save", async (req, res) => {
     const r = await commitDoc(p, author);
     res.json({ ok: true, committed: r.committed });
   } catch (e) { bad(res, 500, e.message); }
+});
+
+// ---- Auteurs et historique ------------------------------------------------------------------------
+app.get("/api/people", (_req, res) => {
+  res.json({ ok: true, people: users.all().map((u) => ({ key: keyOfUser(u), username: u.username, name: u.displayName })) });
+});
+
+app.get("/api/history", async (req, res) => {
+  const p = safeFilePath(String(req.query.path || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
+  try {
+    const list = await repo.history(p, 60);
+    res.json({
+      ok: true, mode: repo.mode,
+      commits: list.map((c) => {
+        const key = keyOfCommit(c);
+        return { sha: c.sha, date: c.date, key, name: authorship.nameOfKey(key, users), title: String(c.message || "").split("\n")[0].slice(0, 200), additions: c.additions, deletions: c.deletions };
+      }),
+    });
+  } catch (e) { bad(res, 502, "Historique indisponible : " + e.message); }
+});
+
+app.get("/api/history/diff", async (req, res) => {
+  const p = safeFilePath(String(req.query.path || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
+  try {
+    const d = await repo.commitDiff(p, String(req.query.sha || ""));
+    res.json({ ok: true, patch: String(d.patch || "").slice(0, 400000), binary: !!d.binary, status: d.status });
+  } catch (e) { bad(res, 400, e.message); }
 });
 
 app.post("/api/sync", async (_req, res) => {
@@ -727,6 +813,7 @@ app.delete("/api/file", async (req, res) => {
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
     }
     states.delete(p);
+    authorStore.remove(repoKey(), p);
     bump("treeVersion");
     res.json({ ok: true, deleted: r.deleted });
   } catch (e) { bad(res, 500, e.message); }

@@ -58,6 +58,9 @@ const ICONS = {
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  highlight: '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+  history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+  bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
@@ -455,6 +458,9 @@ function applyLocal(value) {
 
 function closeSession() {
   F = null;
+  overlay.innerHTML = "";
+  renderAuthorsBar(null);
+  hideTip();
   $("#paneFile").innerHTML = "";
   if (!S) return;
   const s = S;
@@ -530,6 +536,8 @@ function openFile(path, opts = {}) {
     } else if (ev.code === 4001) sessionLost();
   });
 
+  s.ytext.observe(() => { if (S === s) renderOverlay(); }); // couleurs des auteurs
+  provider.awareness.on("change", () => { if (S === s) renderOverlay(); }); // curseurs des autres
   s.ytext.observe((event) => {
     if (S !== s || !s.loaded || event.transaction.origin === LOCAL) return;
     const val = s.ytext.toString();
@@ -547,7 +555,10 @@ function openFile(path, opts = {}) {
     const keys = event.keysChanged;
     if (s.meta.get("loaded") && !s.loaded) onLoaded(s);
     if (keys.has("savedAt")) { s.savedSeen = Date.now(); if (s.lastLocalEdit <= s.savedSeen) s.dirty = false; }
-    if (keys.has("externalAt") && s.loaded) toast("Document mis à jour depuis le dépôt (modification externe).");
+    if (keys.has("externalAt") && s.loaded) {
+      const by = s.meta.get("externalBy");
+      toast(by && by !== "Modification externe" ? `Document mis à jour depuis le dépôt par ${by}.` : "Document mis à jour depuis le dépôt (modification externe).");
+    }
     if (keys.has("deleted")) { toast("Ce document a été supprimé."); refreshTree(); showEmpty(); return; }
     renderStatus();
   });
@@ -577,7 +588,7 @@ function onLoaded(s) {
   }
   s.pendingText = null;
   s.savedSeen = Date.now();
-  renderPreview(); renderStatus(); updateButtons();
+  renderPreview(); renderStatus(); updateButtons(); renderOverlay(); publishCursor();
 }
 
 /** Coupure du temps réel : on repart d'un document neuf à la reconnexion (évite les doublons). */
@@ -650,7 +661,7 @@ ta.addEventListener("input", () => {
   } else if (!s.reconnecting) {
     applyLocal(ta.value);
   }
-  autosize(); schedulePreview(); renderStatus(); publishLine();
+  autosize(); schedulePreview(); renderStatus(); publishLine(); renderOverlay(); publishCursor();
 });
 
 ta.addEventListener("keydown", (e) => {
@@ -676,7 +687,7 @@ function publishLine() {
   }, 250);
 }
 ["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
-window.addEventListener("resize", () => { if (S && S.loaded) autosize(); });
+window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); } });
 
 /* ============================================================================================
  * Visionneuse (PDF, Word, images, autres fichiers)
@@ -828,6 +839,297 @@ window.addEventListener("drop", (e) => {
 });
 
 /* ============================================================================================
+ * Auteurs : qui a écrit quoi (surlignage), qui écrit où (curseurs des autres), historique
+ * ========================================================================================== */
+const people = new Map(); // « u:identifiant » → { name }
+let peopleVersion = 0;
+let showAuthors = localStorage.getItem("ed-authors") === "1";
+let focusAuthor = null;   // n'afficher qu'un auteur
+const CLAUDE_COLOR = "#d97757";
+
+async function loadPeople() {
+  try {
+    const d = await api("GET", "/api/people");
+    people.clear();
+    for (const p of d.people) people.set(p.key, p);
+    peopleVersion++;
+  } catch (_e) {}
+}
+
+let peopleT = null, peopleAt = 0;
+/** Compte inconnu (créé après le chargement de la page) : on recharge l'annuaire, au plus toutes les 10 s. */
+function refreshPeopleSoon() {
+  if (peopleT || Date.now() - peopleAt < 10000) return;
+  peopleT = setTimeout(async () => { peopleAt = Date.now(); await loadPeople(); peopleT = null; renderOverlay(); }, 200);
+}
+function personOf(key) {
+  if (!key) return { key: "", name: "Auteur inconnu", color: "#9ca3af", unknown: true };
+  if (key === "ai:claude") return { key, name: "Claude", color: CLAUDE_COLOR, ai: true };
+  if (key.startsWith("u:")) {
+    const u = key.slice(2), p = people.get(key);
+    if (!p) refreshPeopleSoon();
+    return { key, name: p ? p.name : u, color: colorFor(u), me: !!me && u === me.username };
+  }
+  const n = key.slice(2) || key;
+  return { key, name: n, color: colorFor(n), ext: true };
+}
+function personAvatar(pr, extra = "") {
+  if (pr.ai) return `<span class="avatar ai" style="background:${pr.color}" ${extra}>${svg("bot")}</span>`;
+  return avatarHTML({ name: pr.name, color: pr.color }, extra);
+}
+
+function whenText(min) {
+  if (!min) return "";
+  const ms = min * 60000, d = new Date(ms), now = new Date();
+  if (Date.now() - ms < 3600 * 1000 * 12) return relTime(ms);
+  const time = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return `aujourd'hui à ${time}`;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `hier à ${time}`;
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" }) + ` à ${time}`;
+}
+
+/* ---- Calque sous l'éditeur : couleurs des auteurs, curseurs et sélections des autres ---- */
+const overlay = $("#overlay");
+const OV_PROPS = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing", "wordSpacing", "tabSize",
+  "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+  "boxSizing", "whiteSpace", "overflowWrap", "wordBreak", "textIndent", "fontVariantLigatures", "fontFeatureSettings"];
+let ovRaf = 0;
+function renderOverlay() { cancelAnimationFrame(ovRaf); ovRaf = requestAnimationFrame(drawOverlay); }
+
+function remoteCursors() {
+  const out = [];
+  if (!S || !S.provider) return out;
+  S.provider.awareness.getStates().forEach((st, id) => {
+    if (id === S.ydoc.clientID || !st.cursor || !st.user) return;
+    try {
+      const abs = (j) => { const r = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(j), S.ydoc); return r ? r.index : null; };
+      const a = abs(st.cursor.anchor), h = abs(st.cursor.head);
+      if (a == null || h == null) return;
+      out.push({ anchor: a, head: h, name: String(st.user.name || "").slice(0, 40), color: st.user.color || "#888" });
+    } catch (_e) {}
+  });
+  return out;
+}
+
+function drawOverlay() {
+  const live = S && S.loaded && !S.offline && !S.reconnecting && currentView() !== "preview";
+  const text = live ? ta.value : "";
+  if (!live || text !== S.ytext.toString()) { overlay.innerHTML = ""; renderAuthorsBar(null); return; }
+  const cursors = remoteCursors();
+  const runs = []; // [début, fin, auteur, minute]
+  if (showAuthors) {
+    let i = 0;
+    for (const op of S.ytext.toDelta()) {
+      if (typeof op.insert !== "string") continue;
+      const at = op.attributes || {};
+      runs.push([i, i + op.insert.length, at.a || "", at.t || 0]);
+      i += op.insert.length;
+    }
+  }
+  renderAuthorsBar(showAuthors ? runs : null);
+  if (!runs.length && !cursors.length) { overlay.innerHTML = ""; return; }
+
+  // copie exacte de la mise en page du textarea
+  const cs = getComputedStyle(ta);
+  for (const k of OV_PROPS) overlay.style[k] = cs[k];
+  overlay.style.top = ta.offsetTop + "px";
+  overlay.style.left = ta.offsetLeft + "px";
+  overlay.style.width = ta.offsetWidth + "px";
+  overlay.style.height = ta.offsetHeight + "px";
+
+  const pts = new Set([0, text.length]);
+  for (const r of runs) { pts.add(r[0]); pts.add(r[1]); }
+  const caretsAt = new Map();
+  const sels = [];
+  for (const c of cursors) {
+    const h = Math.min(c.head, text.length);
+    pts.add(h);
+    if (!caretsAt.has(h)) caretsAt.set(h, []);
+    caretsAt.get(h).push(c);
+    if (c.anchor !== c.head) {
+      const s = Math.min(c.anchor, c.head), e = Math.min(Math.max(c.anchor, c.head), text.length);
+      sels.push([s, e, c.color]); pts.add(s); pts.add(e);
+    }
+  }
+  const sorted = [...pts].filter((p) => p >= 0 && p <= text.length).sort((a, b) => a - b);
+  let html = "", ri = 0;
+  for (let k = 0; k < sorted.length; k++) {
+    const p = sorted[k];
+    for (const c of caretsAt.get(p) || []) {
+      html += `<span class="rc" style="--c:${esc(c.color)}"><span class="rc-flag">${esc(c.name)}</span></span>`;
+    }
+    if (k === sorted.length - 1) break;
+    const q = sorted[k + 1];
+    const seg = text.slice(p, q);
+    while (ri < runs.length && runs[ri][1] <= p) ri++;
+    const run = ri < runs.length && runs[ri][0] <= p ? runs[ri] : null;
+    const sel = sels.find((x) => x[0] <= p && q <= x[1]);
+    let attrs = "";
+    const styles = [];
+    const cls = [];
+    if (run && run[2] && (!focusAuthor || focusAuthor === run[2])) {
+      const pr = personOf(run[2]);
+      cls.push("au");
+      styles.push(`--c:${pr.color}`);
+      attrs += ` data-a="${esc(run[2])}" data-t="${run[3]}"`;
+    }
+    if (sel) { cls.push("sel"); styles.push(`--s:${sel[2]}`); }
+    html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
+  }
+  overlay.innerHTML = html + "\u200b";
+}
+
+function renderAuthorsBar(runs) {
+  const bar = $("#authorsBar");
+  if (!runs) { if (!bar.hidden) { bar.hidden = true; bar.innerHTML = ""; } return; }
+  const totals = new Map();
+  let all = 0;
+  for (const [s, e, a] of runs) {
+    const n = S.ytext.toString().slice(s, e).replace(/\s/g, "").length;
+    totals.set(a, (totals.get(a) || 0) + n);
+    all += n;
+  }
+  const list = [...totals.entries()].filter(([, n]) => n > 0).sort((x, y) => y[1] - x[1]);
+  const sig = JSON.stringify([list, focusAuthor, peopleVersion]);
+  if (bar.dataset.sig === sig && !bar.hidden) return;
+  bar.dataset.sig = sig;
+  bar.hidden = false;
+  const pct = (n) => (all ? Math.max(1, Math.round((n / all) * 100)) : 0);
+  bar.innerHTML = `<span class="ab-title">${svg("highlight")}Qui a écrit quoi</span>
+    ${list.map(([a, n]) => {
+      const pr = personOf(a);
+      return `<button class="chip${focusAuthor === a ? " on" : ""}${focusAuthor && focusAuthor !== a ? " dim" : ""}${pr.unknown ? " unknown" : ""}" data-k="${esc(a)}" title="${pr.unknown ? "Texte antérieur au suivi des auteurs" : "Cliquer pour n'afficher que ses passages"}">
+        <i style="background:${pr.color}"></i>${pr.ai ? svg("bot") : ""}${esc(pr.name)}${pr.me ? " (toi)" : ""}<span class="pc">${pct(n)} %</span></button>`;
+    }).join("") || '<span class="muted-sm">Document vide</span>'}
+    <span class="spacer"></span>
+    <button class="icon-btn sm" data-act="close" title="Masquer les auteurs">${svg("x")}</button>`;
+  for (const b of $$(".chip", bar)) {
+    b.onclick = () => { focusAuthor = focusAuthor === b.dataset.k ? null : b.dataset.k; renderOverlay(); };
+  }
+  $('[data-act="close"]', bar).onclick = () => toggleAuthors(false);
+}
+
+function toggleAuthors(on = !showAuthors) {
+  showAuthors = on;
+  focusAuthor = null;
+  localStorage.setItem("ed-authors", on ? "1" : "0");
+  const b = $("#btnAuthors");
+  b.classList.toggle("on", on);
+  b.setAttribute("aria-pressed", String(on));
+  if (on && currentView() === "preview") setView("edit");
+  hideTip();
+  renderOverlay();
+  if (S && S.loaded) autosize();
+}
+
+/* ---- Info-bulle au survol d'un passage ---- */
+const tip = $("#authTip");
+let tipRaf = 0;
+function hideTip() { tip.hidden = true; }
+$("#paneEditor").addEventListener("mousemove", (e) => {
+  if (!showAuthors) return;
+  cancelAnimationFrame(tipRaf);
+  const { clientX: x, clientY: y } = e;
+  tipRaf = requestAnimationFrame(() => {
+    overlay.style.pointerEvents = "auto"; ta.style.pointerEvents = "none";
+    const el = document.elementFromPoint(x, y);
+    overlay.style.pointerEvents = ""; ta.style.pointerEvents = "";
+    const span = el && el.closest ? el.closest("#overlay .au") : null;
+    if (!span) return hideTip();
+    const pr = personOf(span.dataset.a);
+    const when = whenText(Number(span.dataset.t));
+    tip.innerHTML = `${personAvatar(pr)}<div><div class="t">${esc(pr.name)}${pr.me ? " (toi)" : ""}</div>${when ? `<div class="s">${pr.ai ? "via le dépôt · " : ""}${esc(when)}</div>` : ""}</div>`;
+    tip.hidden = false;
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(x + 14, innerWidth - r.width - 8) + "px";
+    tip.style.top = (y + 18 + r.height > innerHeight ? y - r.height - 10 : y + 18) + "px";
+  });
+});
+$("#paneEditor").addEventListener("mouseleave", hideTip);
+$("#paneEditor").addEventListener("scroll", hideTip, { passive: true });
+
+/* ---- Mon curseur, visible des autres ---- */
+let curT = null;
+function publishCursor() {
+  clearTimeout(curT);
+  curT = setTimeout(() => {
+    if (!S || !S.loaded || S.offline || !S.provider || ta.value !== S.ytext.toString()) return;
+    const rel = (i) => Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(S.ytext, i));
+    S.provider.awareness.setLocalStateField("cursor", { anchor: rel(ta.selectionStart), head: rel(ta.selectionEnd) });
+  }, 60);
+}
+document.addEventListener("selectionchange", () => { if (document.activeElement === ta) publishCursor(); });
+
+/* ---- Historique des modifications ---- */
+function cleanTitle(t) {
+  const m = String(t || "").match(/^Easydoc\s*:\s*(création|import|suppression|conversion)?/i);
+  if (!m) return t || "(sans titre)";
+  const k = (m[1] || "").toLowerCase();
+  return k === "création" ? "Création du document" : k === "import" ? "Import du fichier" : k === "suppression" ? "Suppression"
+    : k === "conversion" ? "Version modifiable créée" : "Modifications enregistrées";
+}
+function patchHTML(patch) {
+  const rows = [];
+  for (const line of String(patch).split("\n")) {
+    if (line.startsWith("\\")) continue;
+    const c = line[0];
+    const cls = line.startsWith("@@") ? "hunk" : c === "+" ? "add" : c === "-" ? "del" : "ctx";
+    const body = line.startsWith("@@") ? "⋯" : line.slice(1);
+    rows.push(`<div class="dl ${cls}"><span class="dm">${cls === "add" ? "+" : cls === "del" ? "−" : ""}</span><span class="dt">${esc(body) || " "}</span></div>`);
+  }
+  return rows.join("");
+}
+
+async function openHistory() {
+  const p = currentPath();
+  if (!p) return;
+  openModal({
+    title: "Historique",
+    subtitle: `<strong>${esc(fileName(p))}</strong> · chaque enregistrement, avec son auteur (y compris Claude et les autres outils qui écrivent dans le dépôt)`,
+    wide: true,
+    body: '<div class="hist" id="hist"><div class="loadingview">Chargement…</div></div>',
+    foot: `${S && S.loaded && !S.offline ? `<button class="btn left" data-act="authors">${svg("highlight")}Voir qui a écrit quoi dans le texte</button>` : ""}<button class="btn" data-act="close">Fermer</button>`,
+    async onMount(card) {
+      $('[data-act="close"]', card).onclick = closeModal;
+      const ab = $('[data-act="authors"]', card);
+      if (ab) ab.onclick = () => { closeModal(); toggleAuthors(true); };
+      const box = $("#hist", card);
+      let d;
+      try { d = await api("GET", "/api/history?path=" + encodeURIComponent(p)); }
+      catch (e) { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
+      if (!d.commits.length) { box.innerHTML = '<div class="arows-empty">Pas encore d\'enregistrement pour ce fichier.</div>'; return; }
+      box.innerHTML = d.commits.map((c) => {
+        const pr = personOf(c.key);
+        const date = new Date(c.date);
+        const stats = c.additions != null ? `<span class="hstat"><b class="add">+${c.additions}</b> <b class="del">−${c.deletions}</b></span>` : "";
+        return `<div class="hitem" data-sha="${esc(c.sha)}">
+          <button class="hrow">${personAvatar(pr)}
+            <span class="hmeta"><span class="t">${esc(c.name || pr.name)}${pr.ai ? ' <span class="tag tag-ai">IA</span>' : ""}</span>
+              <span class="s">${esc(cleanTitle(c.title))}</span></span>
+            ${stats}<span class="hdate" title="${esc(date.toLocaleString("fr-FR"))}">${esc(whenText(Math.floor(date.getTime() / 60000)))}</span>
+            <span class="chev">${svg("chevron")}</span></button>
+          <div class="hdiff" hidden></div></div>`;
+      }).join("");
+      for (const item of $$(".hitem", box)) {
+        $(".hrow", item).onclick = async () => {
+          const diff = $(".hdiff", item);
+          const open = item.classList.toggle("open");
+          diff.hidden = !open;
+          if (!open || diff.dataset.loaded) return;
+          diff.innerHTML = '<div class="loadingview">Chargement…</div>';
+          try {
+            const r = await api("GET", `/api/history/diff?path=${encodeURIComponent(p)}&sha=${encodeURIComponent(item.dataset.sha)}`);
+            diff.dataset.loaded = "1";
+            diff.innerHTML = r.patch ? patchHTML(r.patch) : `<div class="muted-sm" style="padding:10px 12px">${r.binary ? "Fichier binaire : pas de détail ligne par ligne." : "Aucune modification de contenu dans cette version."}</div>`;
+          } catch (e) { diff.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+        };
+      }
+    },
+  });
+}
+
+/* ============================================================================================
  * Aperçu Markdown
  * ========================================================================================== */
 let previewT = null;
@@ -858,6 +1160,7 @@ function setView(v) {
   for (const b of $$("#viewSwitch button")) b.classList.toggle("on", b.dataset.view === v);
   renderPreview();
   if (S && S.loaded) autosize();
+  renderOverlay();
 }
 for (const b of $$("#viewSwitch button")) b.onclick = () => setView(b.dataset.view);
 
@@ -905,6 +1208,8 @@ function updateButtons() {
   $("#btnDelete").disabled = !writable;
   $("#btnDelete").style.display = p && !writable ? "none" : "";
   $("#btnAccess").hidden = !(isAdmin() && p);
+  $("#btnAuthors").hidden = !(S && S.loaded && !S.offline);
+  $("#btnHistory").hidden = !p;
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
@@ -1284,6 +1589,8 @@ $("#btnSettings").onclick = () => openAdmin("users");
 $("#workspace").onclick = () => { if (isAdmin()) openAdmin("repo"); };
 $("#btnMe").onclick = openAccount;
 $("#btnAccess").onclick = () => openAdmin("access", { path: currentPath() || "" });
+$("#btnAuthors").onclick = () => toggleAuthors();
+$("#btnHistory").onclick = openHistory;
 $("#btnTheme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
 $("#scrim").onclick = () => $("#app").classList.remove("nav-open");
@@ -1324,6 +1631,8 @@ function pathFromHash() {
   connectSystem();
   await loadConfig();
   if (isAdmin()) await loadRules();
+  await loadPeople();
+  toggleAuthors(showAuthors);
   await refreshTree();
   const wanted = pathFromHash();
   const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files.find(isEditable) || files[0];

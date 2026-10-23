@@ -200,6 +200,107 @@ class RepoService {
     return { deleted: true };
   }
 
+  // ---- Historique : auteurs des modifications --------------------------------------------------
+
+  /** Dernier commit ayant touché un fichier (ou modification non commitée en dépôt local). */
+  async lastCommit(rel) {
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const { data } = await this.octokit.rest.repos.listCommits({ owner, repo, sha: this.options.githubBranch, path: rel, per_page: 1 });
+      return data[0] ? ghCommit(data[0]) : null;
+    }
+    const dirty = (await this.git.raw(["status", "--porcelain", "--", rel])).trim();
+    if (dirty) return { uncommitted: true, name: "Modification externe", date: new Date().toISOString(), message: "" };
+    const list = await this._log(rel, 1, false);
+    return list[0] || null;
+  }
+
+  /** Commits ayant touché un fichier, du plus récent au plus ancien. */
+  async history(rel, limit = 50) {
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const { data } = await this.octokit.rest.repos.listCommits({ owner, repo, sha: this.options.githubBranch, path: rel, per_page: Math.min(limit, 100) });
+      return data.map(ghCommit);
+    }
+    return this._log(rel, limit, true);
+  }
+
+  async _log(rel, limit, stats) {
+    let out;
+    try {
+      out = await this.git.raw(["log", `-n${limit}`, "--follow", "--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%B%x1f", ...(stats ? ["--numstat"] : []), "--", rel]);
+    } catch (_e) { return []; } // dépôt sans commit
+    const list = [];
+    for (const chunk of out.split("\x1e")) {
+      if (!chunk.trim()) continue;
+      const [sha, name, email, date, message, rest = ""] = chunk.split("\x1f");
+      let additions = null, deletions = null;
+      if (stats) {
+        const m = rest.trim().split("\n").filter(Boolean).map((l) => l.split("\t"));
+        if (m.length) { additions = 0; deletions = 0; for (const [a, d] of m) { additions += Number(a) || 0; deletions += Number(d) || 0; } }
+      }
+      list.push({ sha, name, email, date, message: message.trim(), additions, deletions });
+    }
+    return list;
+  }
+
+  /** Modifications d'un fichier dans un commit (format diff unifié, sans en-tête). */
+  async commitDiff(rel, sha) {
+    if (!/^[0-9a-f]{7,40}$/i.test(String(sha))) throw new Error("Version invalide.");
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const { data } = await this.octokit.rest.repos.getCommit({ owner, repo, ref: sha });
+      const f = (data.files || []).find((x) => x.filename === rel || x.previous_filename === rel);
+      return f ? { patch: f.patch || "", binary: !f.patch && f.changes > 0, status: f.status } : { patch: "", status: "absent" };
+    }
+    const out = await this.git.raw(["show", "--format=", "--no-color", "--find-renames", sha, "--", rel]);
+    const i = out.indexOf("\n@@");
+    return { patch: i >= 0 ? out.slice(i + 1) : "", binary: /Binary files/.test(out), status: "modified" };
+  }
+
+  /** Auteur de chaque ligne (plages 1-indexées). */
+  async blame(rel) {
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const q = `query($owner:String!,$name:String!,$expr:String!,$path:String!){repository(owner:$owner,name:$name){object(expression:$expr){... on Commit{blame(path:$path){ranges{startingLine endingLine commit{oid message author{name email date user{login}}}}}}}}}`;
+      const r = await this.octokit.graphql(q, { owner, name: repo, expr: this.options.githubBranch, path: rel });
+      const ranges = (((r || {}).repository || {}).object || {}).blame;
+      return ((ranges && ranges.ranges) || []).map((x) => ({
+        start: x.startingLine, end: x.endingLine,
+        name: x.commit.author && x.commit.author.name, email: x.commit.author && x.commit.author.email,
+        login: x.commit.author && x.commit.author.user && x.commit.author.user.login,
+        date: x.commit.author && x.commit.author.date, message: x.commit.message,
+      }));
+    }
+    let out;
+    try { out = await this.git.raw(["blame", "--line-porcelain", "--", rel]); } catch (_e) { return []; }
+    const lines = [];
+    let cur = null;
+    for (const l of out.split("\n")) {
+      const h = l.match(/^([0-9a-f]{40}) \d+ (\d+)/);
+      if (h) { cur = { sha: h[1], line: Number(h[2]) }; continue; }
+      if (!cur) continue;
+      if (l.startsWith("author ")) cur.name = l.slice(7);
+      else if (l.startsWith("author-mail ")) cur.email = l.slice(12).replace(/[<>]/g, "");
+      else if (l.startsWith("author-time ")) cur.date = new Date(Number(l.slice(12)) * 1000).toISOString();
+      else if (l.startsWith("\t")) { lines.push(cur); cur = null; }
+    }
+    const shas = [...new Set(lines.map((x) => x.sha).filter((s) => !/^0+$/.test(s)))];
+    const messages = new Map();
+    if (shas.length) {
+      const m = await this.git.raw(["show", "-s", "--format=%H%x1f%B%x1e", ...shas]);
+      for (const c of m.split("\x1e")) { const [s, b] = c.trim().split("\x1f"); if (s) messages.set(s.trim(), (b || "").trim()); }
+    }
+    const ranges = [];
+    for (const x of lines) {
+      const uncommitted = /^0+$/.test(x.sha);
+      const last = ranges[ranges.length - 1];
+      if (last && last.sha === x.sha && last.end === x.line - 1) { last.end = x.line; continue; }
+      ranges.push({ sha: x.sha, start: x.line, end: x.line, name: x.name, email: x.email, date: x.date, message: messages.get(x.sha) || "", uncommitted });
+    }
+    return ranges;
+  }
+
   /** Crée quelques documents de départ si le dépôt est vide. */
   async seedIfEmpty() {
     const files = await this.listFiles();
@@ -218,7 +319,8 @@ class RepoService {
         "- Lis les documents existants avant de proposer quoi que ce soit.\n" +
         "- Écris tes propositions et comptes rendus dans `notes/agent.md` (ajoute en bas, date chaque entrée).\n" +
         "- Ne réécris pas un document entier sans qu'on te le demande : modifie les sections concernées.\n" +
-        "- Fais des commits courts et explicites.\n",
+        "- Fais des commits courts et explicites, en gardant la ligne `Co-Authored-By: Claude <noreply@anthropic.com>`\n" +
+        "  à la fin du message : Easydoc s'en sert pour afficher tes modifications sous ton nom.\n",
       "notes/agent.md": "# Notes de l'agent\n\n> Propositions, questions et comptes rendus de l'agent IA.\n",
     };
     for (const [p, c] of Object.entries(seed)) {
@@ -226,6 +328,14 @@ class RepoService {
     }
     return true;
   }
+}
+
+function ghCommit(c) {
+  return {
+    sha: c.sha, name: c.commit.author && c.commit.author.name, email: c.commit.author && c.commit.author.email,
+    login: c.author && c.author.login, date: c.commit.author && c.commit.author.date, message: c.commit.message || "",
+    additions: null, deletions: null,
+  };
 }
 
 module.exports = { RepoService };
