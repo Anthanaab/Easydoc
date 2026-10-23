@@ -79,24 +79,34 @@ modifications*). En dépôt local, l'agent peut modifier directement les fichier
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
   }
   ```
+  Et ajoute `TRUST_PROXY=1` dans le `.env` d'Easydoc (`/opt/easydoc/.env` dans le conteneur),
+  puis `systemctl restart easydoc` : l'anti-force brute utilise alors l'adresse réelle de chaque
+  visiteur (sinon tout le monde aurait celle du proxy) et le cookie de session passe en `Secure`.
+  Ne l'active **que** derrière un proxy : sans proxy, n'importe qui pourrait falsifier son adresse.
 
 ## Qui a écrit quoi
 
 - Chaque caractère tapé dans Easydoc est attribué **par le serveur** au compte connecté (impossible
   à usurper), avec la date. L'attribution est conservée dans `data/authorship/` (hors du dépôt).
 - Le texte modifié par un commit extérieur (Claude, `git push`, autre outil) est attribué à
-  l'auteur du commit — **seulement le passage modifié**, pas tout le paragraphe.
+  l'auteur du commit — **seulement les mots ajoutés ou modifiés**, pas toute la ligne ni le
+  paragraphe (une faute corrigée ne change l'auteur que du mot corrigé).
 - Commits reconnus comme **Claude** : auteur « Claude », adresse `@anthropic.com`, ou ligne
   `Co-Authored-By: Claude …` dans le message (Claude Code l'ajoute par défaut ; le `CLAUDE.md`
   créé par Easydoc demande de la garder). Les autres commits sont attribués à leur auteur git,
   rattaché au compte Easydoc du même identifiant ou du même nom s'il existe.
-- Documents existants : à la première ouverture, l'attribution est reconstituée ligne par ligne
-  à partir de l'historique git (*blame*).
-- Les modifications faites hors d'Easydoc pendant qu'un document est fermé sont attribuées à
-  l'auteur du dernier commit du fichier. Une modification du dépôt local sans commit est
-  marquée « Modification externe ».
+- Documents existants : à la première ouverture, l'attribution est reconstituée en **rejouant
+  tout l'historique du fichier**, mot à mot. Un fichier supprimé puis remis (par Claude ou un
+  autre) retrouve les auteurs de son texte ; un fichier copié d'une autre branche (par exemple
+  une branche `notes` créée par Claude) garde les auteurs de la branche d'origine. Au-delà de
+  200 versions, le départ est pris dans l'historique ligne par ligne (*blame*).
+- Les modifications faites hors d'Easydoc, document ouvert ou fermé, sont attribuées commit par
+  commit à leur auteur. Une modification du dépôt local sans commit est marquée
+  « Modification externe ».
 
 ## Comptes et droits d'accès
 
@@ -135,6 +145,9 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
   inscrit dans les commits est celui du compte connecté (impossible à usurper).
 - Les chemins de fichiers sont validés (impossible de lire ou d'écrire en dehors du dépôt, ni
   les fichiers cachés comme `.git` ou `.env`).
+- En-têtes de sécurité : interdiction d'afficher Easydoc dans la page d'un autre site
+  (*clickjacking*), scripts limités à ceux d'Easydoc (CSP), `nosniff`, pas de fuite d'adresse.
+- Dépendances vérifiées avec `npm audit` (aucune vulnérabilité connue à la publication).
 - Sans HTTPS, les mots de passe circulent en clair sur le réseau : en dehors d'un réseau local
   de confiance ou d'un VPN, place Easydoc derrière un proxy HTTPS (voir ci-dessus).
 
@@ -148,6 +161,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 | `AUTOSAVE_MS` | `5000` | Délai d'enregistrement après la dernière frappe |
 | `POLL_MS` | `20000` | Fréquence de détection des modifications externes |
 | `MAX_UPLOAD_MB` | `25` | Taille maximale d'un fichier importé |
+| `TRUST_PROXY` | `0` | Nombre de reverse proxys de confiance devant Easydoc (`1` derrière nginx, Caddy, Cloudflare Tunnel…) |
 | `GITHUB_TOKEN`, `GITHUB_REPO`, `GITHUB_BRANCH` | — | Préconfiguration, utilisée tant qu'aucun réglage n'a été enregistré depuis l'interface |
 
 ## Développement

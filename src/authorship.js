@@ -22,7 +22,7 @@ const toMin = (d) => { const x = new Date(d).getTime(); return Number.isFinite(x
 /** Opérations minimales pour passer de oldText à newText : [{eq|del|ins, len, text}]. */
 function diffOps(oldText, newText) {
   if (oldText === newText) return [{ op: "eq", len: oldText.length }];
-  const parts = Diff.diffLines(oldText, newText);
+  const parts = Diff.diffLines(oldText, newText, { stripTrailingCr: false });
   const ops = [];
   const push = (op, text) => { if (text) ops.push({ op, len: text.length, text }); };
   for (let i = 0; i < parts.length; i++) {
@@ -96,7 +96,12 @@ function insertSegments(ytext, segs) {
  * garde son auteur, le nouveau texte est attribué à `author` (dernier commit).
  */
 function reconcile(oldText, oldRuns, newText, author) {
-  const segs = segmentsFrom(oldText, oldRuns);
+  return reconcileSegs(segmentsFrom(oldText, oldRuns), newText, author);
+}
+
+/** Comme reconcile, à partir de segments [{text, a, t}]. */
+function reconcileSegs(segs, newText, author) {
+  const oldText = segs.map((x) => x.text).join("");
   // positions → attribution de l'ancien texte
   const out = [];
   let si = 0, off = 0; // segment courant, décalage dans ce segment
@@ -121,6 +126,127 @@ function reconcile(oldText, oldRuns, newText, author) {
     if (l && l.a === s.a && l.t === s.t) l.text += s.text; else merged.push({ ...s });
   }
   return merged;
+}
+
+/** Nombre de caractères identiques entre deux textes (mesure de ressemblance). */
+function commonChars(a, b) {
+  let n = 0;
+  for (const o of diffOps(a, b)) if (o.op === "eq") n += o.len;
+  return n;
+}
+
+/**
+ * Rejoue l'historique d'un fichier : versions [{key, t, text|null}] du plus ancien au plus récent
+ * (text null = fichier supprimé à cette version). À chaque version, le texte inchangé garde son
+ * auteur, seuls les mots ajoutés ou modifiés vont à l'auteur de la version. Un fichier supprimé
+ * puis remis repart de sa dernière version connue ; `base` sert de point de départ (fichier
+ * copié d'une autre branche, ou début d'un historique trop long).
+ * Retourne { segs, lastAlive } (segs null si le fichier n'existe plus à la fin).
+ */
+function replay(versions, base) {
+  let cur = null, lastAlive = base || null;
+  for (const v of versions) {
+    if (v.text == null) { if (cur) lastAlive = cur; cur = null; continue; }
+    const from = cur || lastAlive;
+    if (from && from.map((x) => x.text).join("") === v.text) { cur = from; continue; }
+    cur = from ? reconcileSegs(from, v.text, { a: v.key, t: v.t }) : (v.text ? [{ text: v.text, a: v.key, t: v.t }] : []);
+  }
+  return { segs: cur, lastAlive: cur || lastAlive };
+}
+
+/**
+ * Fusion d'une attribution reconstituée avec l'ancienne (même texte) : on garde l'ancienne quand
+ * elle désigne précisément un compte (frappe en direct) et que la reconstitution est moins précise
+ * (commit à plusieurs noms, auteur inconnu).
+ */
+function mergePreferLive(oldSegs, newSegs) {
+  const text = newSegs.map((x) => x.text).join("");
+  if (oldSegs.map((x) => x.text).join("") !== text) return newSegs;
+  const at = (segs) => { const out = new Array(text.length); let i = 0; for (const x of segs) for (let k = 0; k < x.text.length; k++) out[i++] = x; return out; };
+  const A = at(oldSegs), B = at(newSegs);
+  const merged = [];
+  for (let i = 0; i < text.length; i++) {
+    const o = A[i], n = B[i];
+    const vague = !n.a || (n.a.startsWith("x:") && n.a.includes(","));
+    const w = o && o.a && o.a.startsWith("u:") && vague ? o : n;
+    const l = merged[merged.length - 1];
+    if (l && l.a === w.a && l.t === w.t) l.text += text[i]; else merged.push({ text: text[i], a: w.a, t: w.t });
+  }
+  return merged;
+}
+
+/** map asynchrone avec au plus `n` appels simultanés (API GitHub). */
+async function mapLimit(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) { const k = next++; out[k] = await fn(items[k], k); }
+  }));
+  return out;
+}
+
+
+/** Fichier apparu sur cette branche sans version précédente : copié d'une autre branche ? */
+async function donorFromBranches(repo, name, firstText, keyOfCommit) {
+  const versionOf = (c, text) => ({ key: keyOfCommit(c), t: toMin(c.date), text });
+  let branches = [];
+  try { branches = await repo.otherBranches(4); } catch (_e) { return null; }
+  let best = null, bestScore = 0;
+  for (const b of branches) {
+    try {
+      const { list } = await repo.versions(name, { branch: b, limit: 100 });
+      if (!list.length) continue;
+      const texts = await mapLimit(list, 6, (c) => repo.readAt(name, c.sha));
+      const { lastAlive } = replay(list.map((c, k) => versionOf(c, texts[k])), null);
+      if (!lastAlive) continue;
+      const score = commonChars(lastAlive.map((x) => x.text).join(""), firstText);
+      if (score > bestScore) { best = lastAlive; bestScore = score; }
+    } catch (e) { console.error(`[auteurs] branche ${b} : ${e.message}`); }
+  }
+  return bestScore >= firstText.length * 0.3 ? best : null;
+}
+
+/**
+ * Attribution d'un fichier reconstituée en rejouant son historique (mot à mot) : suppressions et
+ * remises en place, copies depuis une autre branche, historique très long (départ du blame).
+ * `since` + `base` : ne rejoue que les versions postérieures à une attribution connue.
+ */
+async function historySegments(repo, name, content, keyOfCommit, { fromText = null, base = null } = {}) {
+  const versionOf = (c, text) => ({ key: keyOfCommit(c), t: toMin(c.date), text });
+  const { list, truncated } = await repo.versions(name, { limit: 200 });
+  let vs = list, start = null, since = false;
+  if (fromText != null && base) {
+    // attribution connue pour `fromText` : on retrouve cette version (par son contenu, pas par sa
+    // date : l'horloge de l'auteur d'un commit peut être décalée) et on ne rejoue que la suite
+    for (let k = list.length - 1; k >= Math.max(0, list.length - 40); k--) {
+      if ((await repo.readAt(name, list[k].sha)) === fromText) { vs = list.slice(k + 1); start = base; since = true; break; }
+    }
+    if (!since && !list.length) { vs = []; start = base; since = true; }
+  }
+  if (!since && truncated && vs.length) {
+    const first = vs.shift();
+    const text = await repo.readAt(name, first.sha);
+    if (text != null) {
+      let ranges = [];
+      try { ranges = await repo.blame(name, first.sha); } catch (_e) {}
+      start = ranges.length ? segmentsFromBlame(text, ranges, keyOfCommit) : [{ text, a: keyOfCommit(first), t: toMin(first.date) }];
+    }
+  }
+  const texts = await mapLimit(vs, 6, (c) => repo.readAt(name, c.sha));
+  if (!since && !start) {
+    const firstText = texts.find((t) => t != null && t.length > 0);
+    if (firstText) start = await donorFromBranches(repo, name, firstText, keyOfCommit);
+  }
+  const r = replay(vs.map((c, k) => versionOf(c, texts[k])), start);
+  let segs = r.segs || r.lastAlive || [];
+  const text = segs.map((x) => x.text).join("");
+  if (text !== content) { // modification pas encore commitée (dépôt local) ou version plus récente
+    const last = vs[vs.length - 1];
+    const who = repo.mode === "local" ? { a: "x:Modification externe", t: nowMin() }
+      : last ? { a: keyOfCommit(last), t: toMin(last.date) } : { a: "", t: 0 };
+    segs = text ? reconcileSegs(segs, content, who) : [{ text: content, a: who.a, t: who.t }];
+  }
+  return segs;
 }
 
 /** Plages de lignes d'un blame → segments de caractères. */
@@ -170,6 +296,8 @@ function keyFromCommit(c, users) {
       if (names.length === 1) return match(names[0]) || `x:${names[0].slice(0, 40)}`;
       return `x:${names.join(", ").slice(0, 60)}`;
     }
+    const old = title.match(/^Easydoc\s*:\s*([^/()]{1,40})$/); // ancien format « Easydoc: Nom »
+    if (old && !/\.\w+$/.test(old[1].trim())) return match(old[1]) || `x:${old[1].trim()}`;
     return "x:Easydoc";
   }
   return match(c && c.login) || match(name) || `x:${(name || (c && c.login) || "Inconnu").slice(0, 40)}`;
@@ -198,12 +326,12 @@ class AuthorshipStore {
       return d && d.path === p && typeof d.text === "string" && Array.isArray(d.runs) ? d : null;
     } catch (_e) { return null; }
   }
-  save(repoKey, p, text, runs) {
+  save(repoKey, p, text, runs, v) { // v = 2 : attribution reconstituée depuis l'historique complet
     const f = this.file(repoKey, p);
     try {
       fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
       const tmp = `${f}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ path: p, text, runs, savedAt: Date.now() }), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ v: v || 1, path: p, text, runs, savedAt: Date.now() }), { mode: 0o600 });
       fs.renameSync(tmp, f);
     } catch (e) { console.error(`[auteurs] ${p} : ${e.message}`); }
   }
@@ -212,5 +340,6 @@ class AuthorshipStore {
 
 module.exports = {
   CLAUDE, nowMin, toMin, diffOps, applyFineDiff, runsFromYText, segmentsFrom, insertSegments,
-  reconcile, segmentsFromBlame, keyFromCommit, nameOfKey, AuthorshipStore,
+  historySegments, donorFromBranches, mapLimit,
+  reconcile, reconcileSegs, commonChars, replay, mergePreferLive, segmentsFromBlame, keyFromCommit, nameOfKey, AuthorshipStore,
 };

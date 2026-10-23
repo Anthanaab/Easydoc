@@ -258,12 +258,12 @@ class RepoService {
     return { patch: i >= 0 ? out.slice(i + 1) : "", binary: /Binary files/.test(out), status: "modified" };
   }
 
-  /** Auteur de chaque ligne (plages 1-indexées). */
-  async blame(rel) {
+  /** Auteur de chaque ligne (plages 1-indexées), à la version `ref` (par défaut : la branche). */
+  async blame(rel, ref) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
       const q = `query($owner:String!,$name:String!,$expr:String!,$path:String!){repository(owner:$owner,name:$name){object(expression:$expr){... on Commit{blame(path:$path){ranges{startingLine endingLine commit{oid message author{name email date user{login}}}}}}}}}`;
-      const r = await this.octokit.graphql(q, { owner, name: repo, expr: this.options.githubBranch, path: rel });
+      const r = await this.octokit.graphql(q, { owner, name: repo, expr: ref || this.options.githubBranch, path: rel });
       const ranges = (((r || {}).repository || {}).object || {}).blame;
       return ((ranges && ranges.ranges) || []).map((x) => ({
         start: x.startingLine, end: x.endingLine,
@@ -273,7 +273,7 @@ class RepoService {
       }));
     }
     let out;
-    try { out = await this.git.raw(["blame", "--line-porcelain", "--", rel]); } catch (_e) { return []; }
+    try { out = await this.git.raw(["blame", "--line-porcelain", ...(ref ? [ref] : []), "--", rel]); } catch (_e) { return []; }
     const lines = [];
     let cur = null;
     for (const l of out.split("\n")) {
@@ -299,6 +299,76 @@ class RepoService {
       ranges.push({ sha: x.sha, start: x.line, end: x.line, name: x.name, email: x.email, date: x.date, message: messages.get(x.sha) || "", uncommitted });
     }
     return ranges;
+  }
+
+  // ---- Historique complet d'un fichier (reconstitution des auteurs) -----------------------------
+
+  async currentBranch() {
+    if (this.mode === "github") return this.options.githubBranch;
+    try { return (await this.git.raw(["rev-parse", "--abbrev-ref", "HEAD"])).trim(); } catch (_e) { return ""; }
+  }
+
+  /** Autres branches du dépôt (pour retrouver un fichier copié d'une branche à l'autre). */
+  async otherBranches(max = 4) {
+    const cur = await this.currentBranch();
+    let names = [];
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const { data } = await this.octokit.rest.repos.listBranches({ owner, repo, per_page: 50 });
+      names = data.map((b) => b.name);
+    } else {
+      try { names = (await this.git.raw(["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split("\n").map((s) => s.trim()).filter(Boolean); }
+      catch (_e) { names = []; }
+    }
+    return names.filter((n) => n && n !== cur).slice(0, max);
+  }
+
+  /**
+   * Commits qui ont touché un fichier sur une branche (y compris sa suppression), du plus ancien au
+   * plus récent, au plus `limit`. `truncated` : l'historique est plus long.
+   */
+  async versions(rel, { branch, limit = 200 } = {}) {
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const list = [];
+      for (let page = 1; list.length <= limit; page++) {
+        const { data } = await this.octokit.rest.repos.listCommits({ owner, repo, sha: branch || this.options.githubBranch, path: rel, per_page: 100, page });
+        list.push(...data.map(ghCommit));
+        if (data.length < 100) break;
+      }
+      const truncated = list.length > limit;
+      return { list: list.slice(0, limit).reverse(), truncated };
+    }
+    let out;
+    try {
+      out = await this.git.raw(["log", `-n${limit + 1}`, "--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%B", branch || "HEAD", "--", rel]);
+    } catch (_e) { return { list: [], truncated: false }; }
+    const list = [];
+    for (const chunk of out.split("\x1e")) {
+      if (!chunk.trim()) continue;
+      const [sha, name, email, date, message = ""] = chunk.split("\x1f");
+      list.push({ sha: sha.trim(), name, email, date, message: message.trim() });
+    }
+    return { list: list.slice(0, limit).reverse(), truncated: list.length > limit };
+  }
+
+  /** Contenu texte d'un fichier à une version donnée (null s'il n'existe pas à cette version). */
+  async readAt(rel, ref) {
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      try {
+        const { data } = await this.octokit.rest.repos.getContent({ owner, repo, path: rel, ref });
+        if (Array.isArray(data) || data.type !== "file") return null;
+        if (data.encoding === "base64" && data.content) return Buffer.from(data.content, "base64").toString("utf8");
+        if (!data.size) return "";
+        const blob = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: data.sha });
+        return Buffer.from(blob.data.content, "base64").toString("utf8");
+      } catch (e) {
+        if (e.status === 404 || e.status === 409) return null;
+        throw e;
+      }
+    }
+    try { return await this.git.raw(["show", `${ref}:${rel}`]); } catch (_e) { return null; }
   }
 
   /** Crée quelques documents de départ si le dépôt est vide. */

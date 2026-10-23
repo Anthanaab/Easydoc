@@ -39,6 +39,8 @@ const LOCAL_DIR = process.env.LOCAL_REPO_DIR || path.join(DATA_DIR, "localrepo")
 const AUTOSAVE_MS = Number(process.env.AUTOSAVE_MS || 5000);   // délai après la dernière frappe
 const AUTOSAVE_MAX_MS = 60000;                                  // au plus tard, même si on tape sans arrêt
 const POLL_MS = Number(process.env.POLL_MS || 20000);           // détection des modifications externes
+// Derrière un reverse proxy : nombre de proxys de confiance (adresse réelle des visiteurs via X-Forwarded-For).
+const TRUST_PROXY = (() => { const v = String(process.env.TRUST_PROXY || "").trim(); return /^\d+$/.test(v) ? Number(v) : v === "true" ? 1 : 0; })();
 const SYSTEM_DOC = "__system__";
 const SERVER = "easydoc-server";                                // origine des transactions du serveur
 const TEXT = "content";
@@ -81,7 +83,7 @@ function userFromReq(req) {
   if (!u || u.disabled || (u.epoch || 1) !== s.epoch) { sessions.destroy(token); return null; }
   return u;
 }
-const isHttps = (req) => req.socket.encrypted || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+const isHttps = (req) => req.socket.encrypted || (TRUST_PROXY > 0 && String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https");
 function setSessionCookie(req, res, token) {
   const maxAge = Math.floor(auth.SESSION_TTL_MS / 1000);
   res.setHeader("Set-Cookie", `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isHttps(req) ? "; Secure" : ""}`);
@@ -107,21 +109,72 @@ const keyOfUser = (u) => `u:${u.username}`;
 const userAttrs = (u) => ({ a: keyOfUser(u), t: authorship.nowMin() });
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_r, rej) => setTimeout(() => rej(new Error("délai dépassé")), ms))]);
 
-/** Attribution initiale d'un document : fichier annexe, sinon historique git (blame). */
+const ATTR_V = 2; // version des fichiers annexes : 2 = attribution reconstituée depuis l'historique complet
+
+const historySegments = (name, content, opts) => authorship.historySegments(repo, name, content, keyOfCommit, opts);
+
+/** Versions d'un fichier postérieures au contenu `fromText` : [{ text, a, t }] dans l'ordre. */
+async function externalSteps(name, fromText, current) {
+  const { list } = await repo.versions(name, { limit: 30 });
+  const texts = new Map();
+  const textAt = async (c) => { if (!texts.has(c.sha)) texts.set(c.sha, await repo.readAt(name, c.sha)); return texts.get(c.sha); };
+  let k = list.length - 1;
+  for (; k >= 0; k--) if ((await textAt(list[k])) === fromText) break;
+  if (k < 0) return [];
+  const steps = [];
+  for (const c of list.slice(k + 1)) {
+    const text = await textAt(c);
+    if (text != null) steps.push({ text, a: keyOfCommit(c), t: authorship.toMin(c.date) });
+  }
+  return steps.length && steps[steps.length - 1].text === current ? steps : steps.concat([]);
+}
+
+/**
+ * Attribution d'un document à son ouverture. Retourne { segs, v, later } : `later` est une
+ * reconstitution encore en cours (appliquée au document dès qu'elle est prête).
+ */
 async function initialSegments(name, content) {
   const saved = authorStore.load(repoKey(), name);
-  if (saved && saved.text === content) return authorship.segmentsFrom(content, saved.runs);
-  if (saved) {
-    // modifié pendant que le document était fermé (agent IA, push…) : on attribue la différence
-    let who = { a: "", t: authorship.nowMin() };
-    try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
-    return authorship.reconcile(saved.text, saved.runs, content, who);
+  const savedSegs = saved ? authorship.segmentsFrom(saved.text, saved.runs) : null;
+  if (saved && saved.v === ATTR_V) {
+    if (saved.text === content) return { segs: savedSegs, v: ATTR_V };
+    // modifié pendant que le document était fermé : on rejoue les versions postérieures
+    try {
+      const segs = await withTimeout(historySegments(name, content, { fromText: saved.text, base: savedSegs }), 6000);
+      // la frappe en direct (compte précis) prime sur un commit à plusieurs noms
+      return { segs: authorship.mergePreferLive(authorship.reconcileSegs(savedSegs, content, { a: "", t: 0 }), segs), v: ATTR_V };
+    } catch (e) {
+      console.error(`[auteurs] ${name} : ${e.message}`);
+      let who = { a: "", t: authorship.nowMin() };
+      try { const c = await withTimeout(repo.lastCommit(name), 4000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
+      return { segs: authorship.reconcile(saved.text, saved.runs, content, who), v: ATTR_V };
+    }
   }
+  // première ouverture, ou attribution d'une version précédente d'Easydoc : historique complet
+  const job = historySegments(name, content).then((segs) => (savedSegs ? authorship.mergePreferLive(savedSegs, segs) : segs));
   try {
-    const ranges = await withTimeout(repo.blame(name), 10000);
-    if (ranges.length) return authorship.segmentsFromBlame(content, ranges, keyOfCommit);
-  } catch (e) { console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`); }
-  return [{ text: content, a: "", t: 0 }];
+    return { segs: await withTimeout(job, 3500), v: ATTR_V };
+  } catch (_e) {
+    // trop long : le document s'ouvre tout de suite, l'attribution arrive dès qu'elle est prête
+    const quick = savedSegs && saved.text === content ? savedSegs : [{ text: content, a: "", t: 0 }];
+    return { segs: quick, v: 1, later: job };
+  }
+}
+
+/** Applique une attribution reconstituée en arrière-plan, si le texte n'a pas changé entre-temps. */
+function applyLater(name, doc, content, segs) {
+  const s = st(name);
+  const live = yws.docs.get(name) === doc;
+  if (live) {
+    const t = doc.getText(TEXT);
+    if (t.toString() !== content) return; // modifié entre-temps : nouvel essai à la prochaine ouverture
+    doc.transact(() => {
+      let i = 0;
+      for (const x of segs) { if (x.a) t.format(i, x.text.length, { a: x.a, t: x.t || 0 }); i += x.text.length; }
+    }, ATTR);
+  } else if (s.lastCommitted !== content) return;
+  s.attrV = ATTR_V;
+  authorStore.save(repoKey(), name, content, live ? authorship.runsFromYText(doc.getText(TEXT)) : segs.map((x) => [x.text.length, x.a, x.t]), ATTR_V);
 }
 
 // ---- État par document (survit à la destruction du Y.Doc en mémoire) -------------------------
@@ -222,7 +275,7 @@ function commitDoc(name, extraAuthor, docArg) {
     const msg = `Easydoc : ${name} (${authors.length ? authors.join(", ") : "modification"})`;
     try {
       const r = await repo.writeFile(name, content, msg);
-      authorStore.save(rk, name, content, runs);
+      authorStore.save(rk, name, content, runs, s.attrV || ATTR_V);
       s.lastCommitted = content;
       s.lastRemote = content;
       s.baseUpdate = snapshot;
@@ -262,14 +315,19 @@ yws.setPersistence({
     try {
       const file = await repo.readFile(name);
       const content = file ? file.content : "";
-      const segs = content ? await initialSegments(name, content) : [];
+      const init = content ? await initialSegments(name, content) : { segs: [], v: ATTR_V };
       doc.transact(() => {
         const t = doc.getText(TEXT);
-        if (t.length === 0 && content) authorship.insertSegments(t, segs);
+        if (t.length === 0 && content) authorship.insertSegments(t, init.segs);
         meta.set("loaded", true);
         meta.set("exists", !!file);
       }, SERVER);
-      if (content) authorStore.save(repoKey(), name, content, authorship.runsFromYText(doc.getText(TEXT)));
+      s.attrV = init.v;
+      if (content && init.v === ATTR_V) authorStore.save(repoKey(), name, content, authorship.runsFromYText(doc.getText(TEXT)), ATTR_V);
+      if (init.later) {
+        init.later.then((segs) => applyLater(name, doc, content, segs))
+          .catch((e) => console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`));
+      }
       s.lastCommitted = file ? content : null;
       s.lastRemote = s.lastCommitted;
       s.baseUpdate = Y.encodeStateAsUpdate(doc);
@@ -339,12 +397,21 @@ async function pollExternal(force = false) {
         if (file.content === s.lastRemote) return; // rien de nouveau
         // base = dernier état connu du dépôt ; on applique base→distant sur une copie,
         // puis on fusionne cette copie dans le document vivant (CRDT : la saisie en cours est préservée)
-        let who = { a: "", t: authorship.nowMin() };
-        try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
+        // chaque commit intervenu depuis le dernier état connu, dans l'ordre, avec son auteur
+        let steps = [];
+        try { steps = await withTimeout(externalSteps(name, s.lastRemote, file.content), 8000); } catch (_e) {}
+        if (!steps.length || steps[steps.length - 1].text !== file.content) {
+          let who = { a: repo.mode === "local" ? "x:Modification externe" : "", t: authorship.nowMin() };
+          if (repo.mode !== "local" || !steps.length) {
+            try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
+          }
+          steps.push({ text: file.content, a: who.a, t: who.t });
+        }
+        const who = steps[steps.length - 1];
         const tmp = new Y.Doc();
         if (s.baseUpdate) Y.applyUpdate(tmp, s.baseUpdate);
         const before = Y.encodeStateVector(tmp);
-        tmp.transact(() => authorship.applyFineDiff(tmp.getText(TEXT), file.content, who.a ? { a: who.a, t: who.t } : {}));
+        tmp.transact(() => { for (const x of steps) authorship.applyFineDiff(tmp.getText(TEXT), x.text, x.a ? { a: x.a, t: x.t } : {}); });
         const delta = Y.encodeStateAsUpdate(tmp, before);
         Y.applyUpdate(doc, delta, SERVER);
         tmp.destroy();
@@ -358,7 +425,7 @@ async function pollExternal(force = false) {
           doc.getMap("meta").set("externalBy", authorship.nameOfKey(who.a, users) || "");
           doc.getMap("meta").set("externalAt", Date.now());
         }, SERVER);
-        authorStore.save(repoKey(), name, doc.getText(TEXT).toString(), authorship.runsFromYText(doc.getText(TEXT)));
+        authorStore.save(repoKey(), name, doc.getText(TEXT).toString(), authorship.runsFromYText(doc.getText(TEXT)), s.attrV || ATTR_V);
         changed++;
       });
     } catch (e) {
@@ -428,6 +495,32 @@ const encSeg = (s) => encodeURIComponent(s).replace(/\(/g, "%28").replace(/\)/g,
 // ---- API HTTP ------------------------------------------------------------------------------------
 const app = express();
 app.disable("x-powered-by");
+app.set("trust proxy", TRUST_PROXY);
+
+// En-têtes de sécurité : pas d'affichage dans la page d'un autre site (clickjacking), scripts
+// limités à ceux d'Easydoc (le petit script de thème en ligne est autorisé par son empreinte).
+const INLINE_SCRIPT_HASHES = (() => {
+  try {
+    const html = fs.readFileSync(path.join(PUBLIC, "index.html"), "utf8");
+    return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${require("crypto").createHash("sha256").update(m[1]).digest("base64")}'`);
+  } catch (_e) { return []; }
+})();
+const APP_CSP = [
+  "default-src 'self'", `script-src 'self' ${INLINE_SCRIPT_HASHES.join(" ")}`.trim(), "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https:", "connect-src 'self' ws: wss:", "frame-src 'self'", "object-src 'none'",
+  "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
+].join("; ");
+app.use((req, res, next) => {
+  res.set("X-Content-Type-Options", "nosniff");
+  res.set("Referrer-Policy", "same-origin");
+  res.set("Cross-Origin-Opener-Policy", "same-origin");
+  res.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  // /api/raw sert des PDF affichés DANS Easydoc (même origine) : SAMEORIGIN au lieu de DENY
+  if (req.path === "/api/raw") res.set("X-Frame-Options", "SAMEORIGIN");
+  else { res.set("X-Frame-Options", "DENY"); res.set("Content-Security-Policy", APP_CSP); }
+  next();
+});
+app.disable("x-powered-by");
 app.use(express.json({ limit: "5mb" }));
 app.use(express.static(PUBLIC, { maxAge: 0, etag: true }));
 
@@ -464,7 +557,7 @@ const errStatus = (e, fallback = 400) => (e && e.status) || fallback;
 
 // ---- Comptes ------------------------------------------------------------------------------------
 const loginFails = new Map(); // ip → { n, until }
-const clientIp = (req) => req.socket.remoteAddress || "?";
+const clientIp = (req) => (TRUST_PROXY ? req.ip : req.socket.remoteAddress) || "?";
 function tooManyFails(ip) { const a = loginFails.get(ip); return !!(a && a.until > Date.now() && a.n >= 8); }
 function noteFail(ip) {
   let a = loginFails.get(ip);
@@ -812,8 +905,7 @@ app.delete("/api/file", async (req, res) => {
       doc.transact(() => doc.getMap("meta").set("deleted", Date.now()), SERVER);
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
     }
-    states.delete(p);
-    authorStore.remove(repoKey(), p);
+    states.delete(p); // l'annexe des auteurs est conservée : si le fichier est remis, son texte retrouve ses auteurs
     bump("treeVersion");
     res.json({ ok: true, deleted: r.deleted });
   } catch (e) { bad(res, 500, e.message); }

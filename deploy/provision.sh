@@ -20,7 +20,7 @@ SRC_BRANCH="${EASYDOC_BRANCH:-main}"
 APP_DIR=/opt/easydoc
 APP_USER=easydoc
 SERVICE=easydoc.service
-PROVISION_VERSION=4   # marqueur vérifié par easydoc-lxc.sh (le CDN peut servir une version périmée)
+PROVISION_VERSION=5   # marqueur vérifié par easydoc-lxc.sh (le CDN peut servir une version périmée)
 
 if [ -t 1 ]; then G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; N=$'\e[0m'; else G= Y= R= B= N=; fi
 info() { echo "${B}==>${N} $*"; }
@@ -36,17 +36,19 @@ export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 info "Paquets de base et Node.js"
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates gnupg git >/dev/null
-node_ok() { command -v node >/dev/null && [ "$(node -v | cut -d. -f1 | tr -d v)" -ge 18 ]; }
-if node_ok; then
+NODE_MAJOR=22   # requis par la lecture des PDF (unpdf)
+node_major() { command -v node >/dev/null && node -v | cut -d. -f1 | tr -d v || echo 0; }
+if [ "$(node_major)" -ge "$NODE_MAJOR" ]; then
   ok "Node.js $(node -v) déjà présent"
 else
-  if curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/node-setup.sh 2>/dev/null && bash /tmp/node-setup.sh >/dev/null 2>&1; then
+  [ "$(node_major)" -gt 0 ] && info "Mise à niveau de Node.js $(node -v) vers la version $NODE_MAJOR"
+  if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/node-setup.sh 2>/dev/null && bash /tmp/node-setup.sh >/dev/null 2>&1; then
     apt-get install -y -qq nodejs >/dev/null
   else
     warn "Dépôt NodeSource indisponible pour ce système : paquet de la distribution utilisé"
     apt-get install -y -qq nodejs npm >/dev/null
   fi
-  node_ok || die "Node.js 18 ou plus récent est requis."
+  [ "$(node_major)" -ge "$NODE_MAJOR" ] || die "Node.js $NODE_MAJOR ou plus récent est requis (installé : $(node -v 2>/dev/null || echo aucun))."
   ok "Node.js $(node -v)"
 fi
 
