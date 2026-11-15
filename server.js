@@ -979,6 +979,9 @@ app.post("/api/comments", async (req, res) => {
     color: String((req.body && req.body.color) || "").slice(0, 12),
     text,
     line: Number((req.body && req.body.line) || 0),
+    start: Number((req.body && req.body.start) || 0),
+    end: Number((req.body && req.body.end) || 0),
+    snippet: String((req.body && req.body.snippet) || "").slice(0, 200),
   });
   res.json({ ok: true, comment: c });
 });

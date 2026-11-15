@@ -27,13 +27,16 @@ class CommentStore {
     const list = this.map[pathName] || (this.map[pathName] = {});
     return Object.values(list).sort((a, b) => (a.created || 0) - (b.created || 0));
   }
-  add(pathName, { author, authorName, color, text, line }) {
+  add(pathName, { author, authorName, color, text, line, start, end, snippet }) {
     const list = this.map[pathName] || (this.map[pathName] = {});
     const id = crypto.randomBytes(6).toString("hex");
     list[id] = {
       id, author, authorName, color,
       text: String(text).slice(0, 1000),
       line: Number.isFinite(+line) ? +line : 0,
+      start: Number.isFinite(+start) ? +start : null,
+      end: Number.isFinite(+end) ? +end : null,
+      snippet: String(snippet || "").slice(0, 200),
       created: Date.now(), resolved: false,
     };
     this._save();

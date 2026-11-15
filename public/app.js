@@ -629,6 +629,8 @@ function onLoaded(s) {
   s.pendingText = null;
   s.savedSeen = Date.now();
   renderPreview(); renderStatus(); updateButtons(); renderOverlay(); publishCursor();
+  // charge les commentaires dès l'ouverture pour afficher les bulles en édition comme en côte-à-côte
+  loadComments();
 }
 
 /** Coupure du temps réel : on repart d'un document neuf à la reconnexion (évite les doublons). */
@@ -967,8 +969,16 @@ function drawOverlay() {
       i += op.insert.length;
     }
   }
+  // plages saillignées par les commentaires liés à un passage (toujours visibles)
+  const commentAnchors = [];
+  for (const c of commentsList) {
+    if (c.resolved || c.start == null || c.end == null || c.end <= c.start) continue;
+    const s = Math.min(c.start, c.end), e = Math.max(c.start, c.end);
+    if (e > text.length || s < 0) continue;
+    commentAnchors.push({ s, e, color: c.color || "#dc2626" });
+  }
   renderAuthorsBar(showAuthors ? runs : null);
-  if (!runs.length && !cursors.length) { overlay.innerHTML = ""; return; }
+  if (!runs.length && !cursors.length && !commentAnchors.length) { overlay.innerHTML = ""; return; }
 
   // copie exacte de la mise en page du textarea
   const cs = getComputedStyle(ta);
@@ -992,6 +1002,7 @@ function drawOverlay() {
       sels.push([s, e, c.color]); pts.add(s); pts.add(e);
     }
   }
+  for (const a of commentAnchors) { pts.add(a.s); pts.add(a.e); }
   const sorted = [...pts].filter((p) => p >= 0 && p <= text.length).sort((a, b) => a - b);
   let html = "", ri = 0;
   for (let k = 0; k < sorted.length; k++) {
@@ -1015,6 +1026,8 @@ function drawOverlay() {
       attrs += ` data-a="${esc(run[2])}" data-t="${run[3]}"`;
     }
     if (sel) { cls.push("sel"); styles.push(`--s:${sel[2]}`); }
+    const ca = commentAnchors.find((a) => a.s <= p && q <= a.e);
+    if (ca) { cls.push("ca"); styles.push(`--ca:${esc(ca.color)}`); }
     html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
   }
   overlay.innerHTML = html + "\u200b";
@@ -1466,6 +1479,7 @@ async function loadComments() {
   } catch (_e) { commentsList = []; }
   renderComments();
   refreshCommentAnchors();
+  renderOverlay(); // surlignage des passages commentés, visible dès l'ouverture
 }
 function lineOfCursor() {
   const v = (ta.value || "").split("\n");
@@ -1480,11 +1494,23 @@ async function addComment() {
   if (!text) return toast("Écris d'abord un commentaire.", { error: true });
   const p = currentPath();
   if (!p) return;
+  // si une sélection existe dans l'éditeur, le commentaire s'y rattache (start/end/snippet)
+  let start = null, end = null, snippet = "";
   try {
-    await api("POST", "/api/comments", { path: p, text, line: lineOfCursor(), color: me.color });
+    const ss = ta.selectionStart, se = ta.selectionEnd;
+    if (ss != null && se != null && se > ss) {
+      start = ss; end = se;
+      snippet = ta.value.slice(ss, se).trim().slice(0, 200);
+    }
+  } catch (_e) {}
+  try {
+    await api("POST", "/api/comments", {
+      path: p, text, line: lineOfCursor(), color: me.color,
+      start: start == null ? 0 : start, end: end == null ? 0 : end, snippet,
+    });
     if (inp) inp.value = "";
     await loadComments();
-    toast("Commentaire ajouté.");
+    toast(snippet ? "Commentaire lié au passage sélectionné." : "Commentaire ajouté.");
   } catch (e) { toast(e.message, { error: true }); }
 }
 async function setCommentResolved(id, resolved) {
@@ -1518,6 +1544,7 @@ function renderComments() {
       </span>`;
     return `<div class="comment ${c.resolved ? "resolved" : ""}" style="--cc:${esc(c.color || "#888")}">
       <div class="cc-head">${avatarHTML({ name: c.authorName || c.author, color: c.color || "#888" })}<span class="cc-name">${esc(c.authorName || c.author)}</span>${c.line ? `<span class="cc-line">ligne ${c.line}</span>` : ""}<span class="cc-time">${relTime(c.created)}</span>${act}</div>
+      ${c.snippet ? `<div class="cc-snippet">« ${esc(c.snippet)} »</div>` : ""}
       <div class="cc-body">${esc(c.text)}</div>${c.resolved ? `<div class="cc-resolved-tag">Résolu</div>` : ""}
     </div>`;
   }).join("");
@@ -1617,7 +1644,7 @@ function injectPreviewComments() {
     const card = document.createElement("div");
     card.className = "doc-comment" + (c.resolved ? " resolved" : "");
     card.style.setProperty("--cc", c.color || "#0891b2");
-    card.innerHTML = `${svg("comment")}<div class="dc-body"><div class="dc-meta"><span class="dc-author">${esc(c.authorName || c.author)}</span><span>· ${relTime(c.created)}</span>${c.resolved ? '<span class="dc-resolved">Résolu</span>' : ""}</div><div class="dc-text">${esc(c.text)}</div></div>`;
+    card.innerHTML = `${svg("comment")}<div class="dc-body"><div class="dc-meta"><span class="dc-author">${esc(c.authorName || c.author)}</span><span>· ${relTime(c.created)}</span>${c.resolved ? '<span class="dc-resolved">Résolu</span>' : ""}</div>${c.snippet ? `<div class="dc-snippet">« ${esc(c.snippet)} »</div>` : ""}<div class="dc-text">${esc(c.text)}</div></div>`;
     best.after(card);
   }
 }
