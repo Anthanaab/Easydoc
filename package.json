@@ -1,6 +1,6 @@
 {
   "name": "easydoc",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "\u00c9diteur Markdown collaboratif en temps r\u00e9el, auto-h\u00e9berg\u00e9, adoss\u00e9 \u00e0 un d\u00e9p\u00f4t GitHub.",
   "type": "commonjs",
   "main": "server.js",

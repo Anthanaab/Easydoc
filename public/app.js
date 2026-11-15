@@ -729,7 +729,7 @@ function publishLine() {
   }, 250);
 }
 ["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
-window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); renderLineNums(); } });
+window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); } });
 
 /* ============================================================================================
  * Visionneuse (PDF, Word, images, autres fichiers)
@@ -970,7 +970,7 @@ function drawOverlay() {
     }
   }
   // plages saillignées par les commentaires liés à un passage (toujours visibles)
-  const commentAnchors = [];
+  commentAnchors = [];
   for (let ci = 0; ci < commentsList.length; ci++) {
     const c = commentsList[ci];
     if (c.resolved || c.start == null || c.end == null || c.end <= c.start) continue;
@@ -1032,10 +1032,12 @@ function drawOverlay() {
     html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
   }
   overlay.innerHTML = html + "\u200b";
-  bindOverlayCommentHover(overlay);
 }
 
-// Affiche une infobulle flottante au survol du passage souligné (commentaire lié).
+// plages saillignées par les commentaires liés à un passage (remplies par drawOverlay, relues au survol)
+let commentAnchors = [];
+
+// Affiche une infobulle flottante au survol d'un passage commenté.
 let _ctip = null;
 function commentTip() {
   if (!_ctip) {
@@ -1045,23 +1047,55 @@ function commentTip() {
   }
   return _ctip;
 }
-function bindOverlayCommentHover(root) {
-  for (const el of $$(".ca", root)) {
-    el.addEventListener("mousemove", (e) => {
-      const ci = +el.dataset.ci;
-      const c = commentsList[ci];
-      if (!c) return;
-      const tip = commentTip();
-      tip.innerHTML = `<span class="ct-a"><i style="background:${esc(c.color || "#0891b2")}"></i>${esc(c.authorName || c.author)}</span><span class="ct-t">${esc(c.text)}</span>`;
-      tip.style.display = "block";
-      const r = el.getBoundingClientRect();
-      const tw = tip.offsetWidth;
-      tip.style.left = Math.min(window.innerWidth - tw - 12, r.left + 4) + "px";
-      tip.style.top = Math.max(6, r.top - tip.offsetHeight - 8) + "px";
-    });
-    el.addEventListener("mouseleave", () => { const t = commentTip(); t.style.display = "none"; });
-  }
+function hideCommentTip() { const t = commentTip(); t.style.display = "none"; t._hideCi = null; }
+
+// Convertit la position d'un clic/survol (relatif à l'éditeur) en offset de caractère dans le texte.
+function pointToOffset(x, y) {
+  if (!ta.value) return -1;
+  const cs = getComputedStyle(ta);
+  const padL = parseFloat(cs.paddingLeft) || 0;
+  const padT = parseFloat(cs.paddingTop) || 0;
+  const lh = parseFloat(cs.lineHeight) || 16;
+  // ligne et colonne approximatives (lignes simples, sans wrap replié)
+  const relY = y - padT;
+  const relX = x - padL;
+  const row = Math.max(0, Math.floor(relY / lh));
+  const lines = ta.value.split("\n");
+  let off = 0;
+  if (row >= lines.length) return ta.value.length;
+  for (let i = 0; i < row; i++) off += lines[i].length + 1;
+  // colonne → caractère (approx mono-espace via width moyenne)
+  const avgChar = (cs.fontSize ? parseFloat(cs.fontSize) * 0.55 : 8);
+  off += Math.max(0, Math.min(Math.round(relX / avgChar), lines[row].length));
+  return off;
 }
+
+// Détecte un commentaire sous la souris et affiche l'infobulle ; cache sinon.
+function hoverCommentAt(clientX, clientY) {
+  const r = paneEditor.getBoundingClientRect();
+  const x = clientX - r.left, y = clientY - r.top;
+  if (x < 0 || y < 0 || !S || !S.loaded) { hideCommentTip(); return; }
+  const off = pointToOffset(x, y);
+  let found = null;
+  for (const a of commentAnchors) {
+    if (!a.c.resolved && off >= a.s - 1 && off <= a.e) { found = a; break; }
+  }
+  if (!found) { hideCommentTip(); return; }
+  const c = found.c;
+  const tip = commentTip();
+  if (tip._hideCi === c.id) return;
+  tip.innerHTML = `<span class="ct-a"><i style="background:${esc(c.color || "#0891b2")}"></i>${esc(c.authorName || c.author)}</span><span class="ct-t">${esc(c.text)}</span>`;
+  tip.style.display = "block";
+  tip._hideCi = c.id;
+  const tw = tip.offsetWidth;
+  const tx = Math.min(window.innerWidth - tw - 12, clientX - r.left + r.left + 12);
+  const ty = clientY - r.top + r.top - tip.offsetHeight - 8;
+  tip.style.left = Math.max(8, tx) + "px";
+  tip.style.top = Math.max(6, ty) + "px";
+}
+// Le survol de la zone d'édition déclenche l'infobulle dès qu'on passe sur un passage commenté.
+paneEditor.addEventListener("mousemove", (e) => hoverCommentAt(e.clientX, e.clientY), { passive: true });
+paneEditor.addEventListener("mouseleave", hideCommentTip);
 
 function renderAuthorsBar(runs) {
   const bar = $("#authorsBar");
@@ -1582,43 +1616,10 @@ function renderComments() {
   for (const b of $$("[data-cact=del]", wrap)) b.onclick = () => deleteComment(b.dataset.id);
 }
 
-/* ---- Marqueurs de commentaire ancrés sur les lignes (marge de l'éditeur + aperçu) ---- */
-let commentMarksVisible = true;
-function commentMarksBox() { return $("#commentMarks"); }
-function lineToOffset(line, text) {
-  // position en caractères du début de la ligne `line` (1-based), dans `text`
-  let i = 0, ln = 1;
-  while (ln < line && i < text.length) { 
-    if (text[i] === "\n") ln++;
-    i++;
-  }
-  return i;
-}
+/* ---- Ancrage des commentaires (texte souligné + cartes d'aperçu) ---- */
 function updateCommentMarkers() {
-  // La bulle et le trait de la marge ont été retirés : seuls le texte souligné
-  // et l'infobulle au survol (voir bindOverlayCommentHover) gardent les commentaires visibles.
-  const box = commentMarksBox();
-  if (box) box.innerHTML = "";
-}
-
-// Mesure la position verticale (px) du début de la ligne contenant `offset` dans `text`,
-// avec le rendu exact du textarea (paddingTop inclus, paddingBottom à 0 pour ne pas décaler).
-function measureOffsetY(offset, text) {
-  const cs = getComputedStyle(ta);
-  const m = document.createElement("div");
-  m.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;display:block;";
-  m.style.font = cs.font; m.style.lineHeight = cs.lineHeight; m.style.letterSpacing = cs.letterSpacing;
-  m.style.paddingLeft = cs.paddingLeft; m.style.paddingRight = cs.paddingRight;
-  m.style.paddingTop = cs.paddingTop; m.style.paddingBottom = "0px"; // pas de padding bas (décalerait la mesure)
-  const w = ta.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-  m.style.width = w + "px";
-  // on inclut le premier caractère de la ligne cible pour forcer le \n précédent à compter une ligne
-  m.textContent = text.slice(0, Math.min(Math.max(offset, 0) + 1, text.length));
-  document.body.appendChild(m);
-  const lh = parseFloat(getComputedStyle(m).lineHeight) || 16;
-  const h = m.getBoundingClientRect().height;
-  m.remove();
-  return Math.max(0, h - lh); // y absolu (avec paddingTop) du début de la ligne
+  // Les marqueurs de marge ont été retirés : le commentaire est porté par le texte
+  // souligné dans l'éditeur et par la carte dans l'aperçu.
 }
 function escapeXml(s) { return esc(String(s)); }
 function focusCommentAt(line) {
@@ -1633,8 +1634,6 @@ function focusCommentAt(line) {
   const hl = document.querySelector("#commentsList .comment.hl");
   if (hl) hl.scrollIntoView({ block: "center" });
 }
-// re-positionnement au défilement
-paneEditor.addEventListener("scroll", () => requestAnimationFrame(() => { updateCommentMarkers(); renderLineNums(); }), { passive: true });
 
 // insère des cartes de commentaires dans l'aperçu, sous le paragraphe concerné
 function injectPreviewComments() {
@@ -1670,33 +1669,8 @@ function injectPreviewComments() {
 }
 function refreshCommentAnchors() {
   updateCommentMarkers();
-  renderLineNums();
   injectPreviewComments();
 }
-
-// Numéros de ligne dans la marge gauche, alignés verticalement avec le texte de l'éditeur.
-function renderLineNums() {
-  const box = $("#lineNums"); if (!box) return;
-  const taV = (ta && ta.value) || "";
-  const count = taV.length ? taV.split("\n").length : 0;
-  if (!S || !S.loaded || !count) { box.innerHTML = ""; return; }
-  const ov = $("#overlay");
-  const padL = parseFloat(getComputedStyle(ta).paddingLeft) || 48;
-  const width = Math.max(30, Math.min(46, padL - 8)); // tient dans la marge gauche du texte
-  box.style.width = width + "px";
-  box.style.left = (ov.offsetLeft + padL - width) + "px";
-  box.style.top = (ov.offsetTop - 2) + "px";
-  box.style.height = (ta.offsetHeight + 4) + "px";
-  let html = "";
-  for (let i = 1; i <= count; i++) html += `<span class="ln" data-l="${i}"></span>`;
-  box.innerHTML = html;
-  for (const n of $$(".ln", box)) {
-    const line = +n.dataset.l;
-    n.style.top = measureOffsetY(lineOffset(line, taV), taV) + "px";
-    n.textContent = String(line);
-  }
-}
-function lineOffset(line, text) { let i = 0, l = 1; while (l < line && i < text.length) { if (text[i] === "\n") l++; i++; } return i; }
 
 $("#btnComments").onclick = toggleComments;
 $("#btnCommentsClose").onclick = closeComments;
