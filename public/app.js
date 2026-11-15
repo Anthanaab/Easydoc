@@ -1339,6 +1339,7 @@ function renderPreview() {
     const target = resolveRel(img.getAttribute("src"), S.path);
     if (target) img.src = rawUrl(target);
   }
+  injectPreviewComments();
 }
 $("#preview").addEventListener("click", (e) => {
   const a = e.target.closest("a[href]");
@@ -1443,6 +1444,7 @@ async function loadComments() {
     commentsList = d.comments || [];
   } catch (_e) { commentsList = []; }
   renderComments();
+  refreshCommentAnchors();
 }
 function lineOfCursor() {
   const v = (ta.value || "").split("\n");
@@ -1501,6 +1503,108 @@ function renderComments() {
   for (const b of $$("[data-cact=res]", wrap)) b.onclick = () => { const c = commentsList.find((x) => x.id === b.dataset.id); setCommentResolved(b.dataset.id, !(c && c.resolved)); };
   for (const b of $$("[data-cact=del]", wrap)) b.onclick = () => deleteComment(b.dataset.id);
 }
+
+/* ---- Marqueurs de commentaire ancrés sur les lignes (marge de l'éditeur + aperçu) ---- */
+let commentMarksVisible = true;
+function commentMarksBox() { return $("#commentMarks"); }
+function lineToOffset(line, text) {
+  // position en caractères du début de la ligne `line` (1-based), dans `text`
+  let i = 0, ln = 1;
+  while (ln < line && i < text.length) { 
+    if (text[i] === "\n") ln++;
+    i++;
+  }
+  return i;
+}
+function updateCommentMarkers() {
+  const box = commentMarksBox(); const p = currentPath(); const taV = (ta && ta.value) || "";
+  if (!box) return;
+  if (!p || !commentsList.length) { box.innerHTML = ""; return; }
+  // Fonction approximative : position verticale (en px) du début d'une ligne dans le contenu du textarea
+  const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 17;
+  const contentH = ta.scrollHeight, viewH = paneEditor.clientHeight;
+  const scrollTop = paneEditor.scrollTop;
+  const padTop = parseFloat(getComputedStyle(ta).paddingTop) || 0;
+  const totLines = taV.split("\n").length;
+  let html = "";
+  const counts = new Map();
+  for (const c of commentsList) {
+    if (!c || !c.line) continue;
+    counts.set(c.line, (counts.get(c.line) || 0) + 1);
+  }
+  const seen = new Map(); // line -> index
+  for (const c of commentsList) {
+    if (!c || !c.line) continue;
+    const line = c.line;
+    const idx = seen.get(line) || 0; seen.set(line, idx + 1);
+    const ratio = totLines > 1 ? Math.min(1, (line - 1) / (totLines - 1)) : 0;
+    const y = padTop + ratio * (contentH - viewH) - scrollTop;
+    const tip = escapeXml(c.authorName || c.author) + " — " + escapeXml(c.text);
+    html += `<div class="cm-line" style="top:${Math.max(0, y - 1)}px;--cc:${esc(c.color || "#0891b2")}"></div>
+      <div class="cm-bubble" data-line="${line}" style="top:${Math.max(0, y - 11)}px;background:${esc(c.color || "#0891b2")}" title="${c.authorName || c.author}">
+        ${counts.get(line) > 1 ? `<span class="cm-count">${counts.get(line)}</span>` : svg("comment")}
+        <span class="cm-tip">${tip}</span>
+      </div>`;
+  }
+  // on évite les doublons d'id : les bulles n'ont pas d'id, uniquement data-line
+  box.innerHTML = html;
+  for (const b of $$(".cm-bubble", box)) {
+    b.onclick = () => { focusCommentAt(+b.dataset.line); };
+  }
+}
+function escapeXml(s) { return esc(String(s)); }
+function focusCommentAt(line) {
+  openComments();
+  // met en avant le commentaire de cette ligne dans le panneau (le plus récent)
+  const cards = $$("#commentsList .comment");
+  for (const card of cards) {
+    const lineEl = card.querySelector(".cc-line");
+    if (lineEl && +lineEl.textContent.replace(/\D/g, "") === line) card.classList.add("hl");
+    else card.classList.remove("hl");
+  }
+  const hl = document.querySelector("#commentsList .comment.hl");
+  if (hl) hl.scrollIntoView({ block: "center" });
+}
+// re-positionnement au défilement
+paneEditor.addEventListener("scroll", () => requestAnimationFrame(updateCommentMarkers), { passive: true });
+
+// insère des cartes de commentaires dans l'aperçu, sous le paragraphe concerné
+function injectPreviewComments() {
+  const el = $("#preview"); const p = currentPath();
+  if (!el || !p) return;
+  // retirer les cartes déjà injectées (elles portent la classe doc-comment)
+  for (const old of $$(".doc-comment", el)) old.remove();
+  if (!commentsList.length) return;
+  const blocks = Array.from(el.children);
+  const text = (ta?.value) || "";
+  const lineOfBlock = (blk) => {
+    // on retrouve la première ligne source correspondant à ce bloc (via le texte)
+    const firstTxt = blk.textContent.trim();
+    if (!firstTxt) return 0;
+    const at = text.indexOf(firstTxt.length > 30 ? firstTxt.slice(0, 30) : firstTxt);
+    if (at < 0) return 0;
+    return text.slice(0, at).split("\n").length;
+  };
+  const attached = new Set();
+  for (const c of commentsList) {
+    if (!c || !c.line || attached.has(c.id)) continue;
+    // on choisit le bloc dont la ligne source est >= c.line (le plus proche)
+    let best = null, bestLine = Infinity;
+    for (const b of blocks) { const bl = lineOfBlock(b); if (bl >= c.line && bl < bestLine) { best = b; bestLine = bl; } }
+    if (!best) continue;
+    attached.add(c.id);
+    const card = document.createElement("div");
+    card.className = "doc-comment" + (c.resolved ? " resolved" : "");
+    card.style.setProperty("--cc", c.color || "#0891b2");
+    card.innerHTML = `${svg("comment")}<div class="dc-body"><div class="dc-meta"><span class="dc-author">${esc(c.authorName || c.author)}</span><span>· ${relTime(c.created)}</span>${c.resolved ? '<span class="dc-resolved">Résolu</span>' : ""}</div><div class="dc-text">${esc(c.text)}</div></div>`;
+    best.after(card);
+  }
+}
+function refreshCommentAnchors() {
+  updateCommentMarkers();
+  injectPreviewComments();
+}
+
 $("#btnComments").onclick = toggleComments;
 $("#btnCommentsClose").onclick = closeComments;
 $("#commentForm").onsubmit = (e) => { e.preventDefault(); addComment(); };
