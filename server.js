@@ -26,6 +26,7 @@ const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths")
 const convert = require("./src/convert");
 const auth = require("./src/auth");
 const authorship = require("./src/authorship");
+const { CommentStore } = require("./src/comments");
 const { TunnelManager } = require("./src/tunnel");
 const { Updater } = require("./src/updater");
 const pkg = require("./package.json");
@@ -118,6 +119,8 @@ function sameOrigin(req) {
 
 // ---- Auteurs (qui a écrit quoi) ----------------------------------------------------------------
 const authorStore = new authorship.AuthorshipStore(path.join(DATA_DIR, "authorship"));
+// ---- Commentaires (façon Google Docs, par document) --------------------------------------------
+const comments = new CommentStore(path.join(DATA_DIR, "comments.json"));
 const repoKey = () => (repo.mode === "github" ? `github:${repo.options.githubRepo}@${repo.options.githubBranch}` : "local");
 const keyOfCommit = (c) => authorship.keyFromCommit(c, users);
 const keyOfUser = (u) => `u:${u.username}`;
@@ -955,6 +958,51 @@ app.get("/api/history/diff", async (req, res) => {
     const d = await repo.commitDiff(p, String(req.query.sha || ""));
     res.json({ ok: true, patch: String(d.patch || "").slice(0, 400000), binary: !!d.binary, status: d.status });
   } catch (e) { bad(res, 400, e.message); }
+});
+
+app.get("/api/comments", async (req, res) => {
+  const p = safeFilePath(String(req.query.path || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
+  res.json({ ok: true, comments: comments.all(p), path: p });
+});
+
+app.post("/api/comments", async (req, res) => {
+  const p = safeFilePath(String((req.body && req.body.path) || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "write")) return;
+  const text = String((req.body && req.body.text) || "").trim();
+  if (!text) return bad(res, 400, "Commentaire vide.");
+  const c = comments.add(p, {
+    author: `u:${req.user.username}`,
+    authorName: req.user.displayName,
+    color: String((req.body && req.body.color) || "").slice(0, 12),
+    text,
+    line: Number((req.body && req.body.line) || 0),
+  });
+  res.json({ ok: true, comment: c });
+});
+
+app.post("/api/comments/resolve", async (req, res) => {
+  const p = safeFilePath(String((req.body && req.body.path) || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "write")) return;
+  const id = String((req.body && req.body.id) || "");
+  const resolved = !!((req.body && req.body.resolved) !== false);
+  const c = comments.setResolved(p, id, resolved);
+  if (!c) return bad(res, 404, "Commentaire introuvable.");
+  res.json({ ok: true, comment: c });
+});
+
+app.delete("/api/comments", async (req, res) => {
+  const p = safeFilePath(String((req.query && req.query.path) || ""));
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "write")) return;
+  const id = String((req.query && req.query.id) || "");
+  const c = comments.all(p).find((x) => x.id === id);
+  if (c && c.author !== `u:${req.user.username}` && req.user.role !== "admin") return bad(res, 403, "Vous ne pouvez supprimer que vos propres commentaires.");
+  const ok = comments.remove(p, id);
+  res.json({ ok });
 });
 
 // Restaure un document à une version antérieure de son historique.

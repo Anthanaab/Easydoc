@@ -64,6 +64,7 @@ const ICONS = {
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
   list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  comment: '<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5Z"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
@@ -130,7 +131,22 @@ function resolveRel(href, fromPath) {
  * Identité, thème
  * ========================================================================================== */
 const PALETTE = ["#4f46e5", "#0891b2", "#059669", "#d97706", "#dc2626", "#db2777", "#7c3aed", "#2563eb", "#65a30d", "#ea580c"];
-function colorFor(name) { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
+// Assignation de couleur UNIQUE par personne (nom d'utilisateur / auteur externe) :
+// dès qu'une identité est vue, elle reçoit la première couleur de la PALETTE encore libre.
+// Deux personnes n'ont donc jamais la même couleur, et une même personne garde sa couleur.
+const _colorUsed = new Set();
+const _colorByPerso = new Map();
+function colorFor(name) {
+  if (_colorByPerso.has(name)) return _colorByPerso.get(name);
+  let c = PALETTE[0];
+  for (let i = 0; i < PALETTE.length; i++) {
+    c = PALETTE[i];
+    if (!_colorUsed.has(c)) break;
+  }
+  _colorByPerso.set(name, c);
+  _colorUsed.add(c);
+  return c;
+}
 function initials(name) {
   const p = name.trim().split(/\s+/).filter(Boolean);
   return ((p[0] || "?")[0] + (p.length > 1 ? p[p.length - 1][0] : "")).toUpperCase();
@@ -1390,8 +1406,104 @@ function updateButtons() {
   $("#btnAuthors").hidden = !(S && S.loaded && !S.offline);
   $("#btnHistory").hidden = !p;
   $("#btnCopyLink").hidden = !p;
+  $("#btnComments").hidden = !(p && S && S.kind === "markdown");
+  if ($("#btnComments").hidden) closeComments();
+  if (commentsPath && commentsPath !== p) loadComments();
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
+
+/* ============================================================================================
+ * Commentaires (façon Google Docs) — panneau latéral à droite
+ * ========================================================================================== */
+let commentsPath = null;   // document actuellement affiché dans le panneau
+let commentsList = [];     // commentaires du document
+function commentPanel() { return $("#commentsPanel"); }
+function openComments() {
+  if (!S || !S.loaded) return;
+  loadComments();
+  $("#commentsPanel").hidden = false;
+  $("#commentsPanel").classList.add("open");
+  $("#btnComments").classList.add("on");
+  const ta = $("#commentInput");
+  if (ta && !document.activeElement.classList.contains("comment-input")) setTimeout(() => ta.focus(), 60);
+}
+function closeComments() {
+  const p = commentPanel();
+  if (!p) return;
+  p.hidden = true; p.classList.remove("open");
+  $("#btnComments").classList.remove("on");
+}
+function toggleComments() { $("#commentsPanel").hidden ? openComments() : closeComments(); }
+async function loadComments() {
+  const p = currentPath();
+  if (!p) return;
+  commentsPath = p;
+  try {
+    const d = await api("GET", "/api/comments?path=" + encodeURIComponent(p));
+    commentsList = d.comments || [];
+  } catch (_e) { commentsList = []; }
+  renderComments();
+}
+function lineOfCursor() {
+  const v = (ta.value || "").split("\n");
+  const sel = ta.selectionStart || 0;
+  let ln = 1, acc = 0;
+  for (let i = 0; i < v.length; i++) { if (sel <= acc + v[i].length) return ln; acc += v[i].length + 1; ln++; }
+  return ln;
+}
+async function addComment() {
+  const inp = $("#commentInput");
+  const text = (inp && inp.value || "").trim();
+  if (!text) return toast("Écris d'abord un commentaire.", { error: true });
+  const p = currentPath();
+  if (!p) return;
+  try {
+    await api("POST", "/api/comments", { path: p, text, line: lineOfCursor(), color: me.color });
+    if (inp) inp.value = "";
+    await loadComments();
+    toast("Commentaire ajouté.");
+  } catch (e) { toast(e.message, { error: true }); }
+}
+async function setCommentResolved(id, resolved) {
+  const p = currentPath(); if (!p) return;
+  try { await api("POST", "/api/comments/resolve", { path: p, id, resolved }); await loadComments(); }
+  catch (e) { toast(e.message, { error: true }); }
+}
+async function deleteComment(id) {
+  const p = currentPath(); if (!p) return;
+  try { await api("DELETE", "/api/comments?path=" + encodeURIComponent(p) + "&id=" + encodeURIComponent(id)); await loadComments(); }
+  catch (e) { toast(e.message, { error: true }); }
+}
+function commentToggleIcon(resolved) {
+  const inner = resolved
+    ? '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'
+    : '<path d="M20 6 9 17l-5-5"/>';
+  return `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
+}
+function renderComments() {
+  const panel = commentPanel(); if (!panel) return;
+  const p = currentPath();
+  const wrap = $("#commentsList", panel);
+  if (!wrap) return;
+  if (!p) { wrap.innerHTML = `<p class="muted-sm">Aucun document ouvert.</p>`; return; }
+  if (!commentsList.length) { wrap.innerHTML = `<p class="muted-sm">Aucun commentaire sur ce document. Sélectionne un passage et écris ton commentaire ci-dessous.</p>`; return; }
+  wrap.innerHTML = commentsList.map((c) => {
+    const mine = me && c.author === `u:${me.username}`;
+    const act = `<span class="cc-actions">
+        <button class="icon-btn sm" data-cact="res" data-id="${esc(c.id)}" title="${c.resolved ? "Rouvrir" : "Marquer comme résolu"}">${commentToggleIcon(c.resolved)}</button>
+        ${mine ? `<button class="icon-btn sm" data-cact="del" data-id="${esc(c.id)}" title="Supprimer">${svg("trash")}</button>` : ""}
+      </span>`;
+    return `<div class="comment ${c.resolved ? "resolved" : ""}" style="--cc:${esc(c.color || "#888")}">
+      <div class="cc-head">${avatarHTML({ name: c.authorName || c.author, color: c.color || "#888" })}<span class="cc-name">${esc(c.authorName || c.author)}</span>${c.line ? `<span class="cc-line">ligne ${c.line}</span>` : ""}<span class="cc-time">${relTime(c.created)}</span>${act}</div>
+      <div class="cc-body">${esc(c.text)}</div>${c.resolved ? `<div class="cc-resolved-tag">Résolu</div>` : ""}
+    </div>`;
+  }).join("");
+  for (const b of $$("[data-cact=res]", wrap)) b.onclick = () => { const c = commentsList.find((x) => x.id === b.dataset.id); setCommentResolved(b.dataset.id, !(c && c.resolved)); };
+  for (const b of $$("[data-cact=del]", wrap)) b.onclick = () => deleteComment(b.dataset.id);
+}
+$("#btnComments").onclick = toggleComments;
+$("#btnCommentsClose").onclick = closeComments;
+$("#commentForm").onsubmit = (e) => { e.preventDefault(); addComment(); };
 
 /* ============================================================================================
  * Actions
