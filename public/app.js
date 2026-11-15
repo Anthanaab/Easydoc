@@ -1595,11 +1595,12 @@ function updateCommentMarkers() {
     const idx = seen.get(line) || 0; seen.set(line, idx + 1);
     let y = yFor(c);
     if (seen.get(line) > 1) y += 14 * idx; // décale les bulles multiples sur la même ligne
-    const tip = escapeXml(c.authorName || c.author) + " — " + escapeXml(c.text);
+    const tipAuthor = escapeXml(c.authorName || c.author);
+    const tipText = escapeXml(c.text);
     html += `<div class="cm-line" style="top:${Math.max(0, y - 1)}px;--cc:${esc(c.color || "#0891b2")}"></div>
-      <div class="cm-bubble" data-line="${line}" style="top:${Math.max(0, y - 11)}px;background:${esc(c.color || "#0891b2")}" title="${c.authorName || c.author}">
+      <div class="cm-bubble" data-line="${line}" style="top:${Math.max(0, y - 11)}px;background:${esc(c.color || "#0891b2")}" title="${tipAuthor}">
         ${counts.get(line) > 1 ? `<span class="cm-count">${counts.get(line)}</span>` : svg("comment")}
-        <span class="cm-tip">${tip}</span>
+        <span class="cm-tip"><span class="cm-tip-author"><i style="background:${esc(c.color || "#0891b2")}"></i>${tipAuthor}</span><span class="cm-tip-text">${tipText}</span></span>
       </div>`;
   }
   box.innerHTML = html;
