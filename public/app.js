@@ -729,7 +729,7 @@ function publishLine() {
   }, 250);
 }
 ["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
-window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); } });
+window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); renderLineNums(); } });
 
 /* ============================================================================================
  * Visionneuse (PDF, Word, images, autres fichiers)
@@ -971,11 +971,12 @@ function drawOverlay() {
   }
   // plages saillignées par les commentaires liés à un passage (toujours visibles)
   const commentAnchors = [];
-  for (const c of commentsList) {
+  for (let ci = 0; ci < commentsList.length; ci++) {
+    const c = commentsList[ci];
     if (c.resolved || c.start == null || c.end == null || c.end <= c.start) continue;
     const s = Math.min(c.start, c.end), e = Math.max(c.start, c.end);
     if (e > text.length || s < 0) continue;
-    commentAnchors.push({ s, e, color: c.color || "#dc2626" });
+    commentAnchors.push({ s, e, color: c.color || "#dc2626", c, ci });
   }
   renderAuthorsBar(showAuthors ? runs : null);
   if (!runs.length && !cursors.length && !commentAnchors.length) { overlay.innerHTML = ""; return; }
@@ -1027,10 +1028,39 @@ function drawOverlay() {
     }
     if (sel) { cls.push("sel"); styles.push(`--s:${sel[2]}`); }
     const ca = commentAnchors.find((a) => a.s <= p && q <= a.e);
-    if (ca) { cls.push("ca"); styles.push(`--ca:${esc(ca.color)}`); }
+    if (ca) { cls.push("ca"); styles.push(`--ca:${esc(ca.color)}`); attrs += ` data-ci="${ca.ci}"`; }
     html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
   }
   overlay.innerHTML = html + "\u200b";
+  bindOverlayCommentHover(overlay);
+}
+
+// Affiche une infobulle flottante au survol du passage souligné (commentaire lié).
+let _ctip = null;
+function commentTip() {
+  if (!_ctip) {
+    _ctip = document.body.appendChild(document.createElement("div"));
+    _ctip.className = "ctip";
+    _ctip.style.display = "none";
+  }
+  return _ctip;
+}
+function bindOverlayCommentHover(root) {
+  for (const el of $$(".ca", root)) {
+    el.addEventListener("mousemove", (e) => {
+      const ci = +el.dataset.ci;
+      const c = commentsList[ci];
+      if (!c) return;
+      const tip = commentTip();
+      tip.innerHTML = `<span class="ct-a"><i style="background:${esc(c.color || "#0891b2")}"></i>${esc(c.authorName || c.author)}</span><span class="ct-t">${esc(c.text)}</span>`;
+      tip.style.display = "block";
+      const r = el.getBoundingClientRect();
+      const tw = tip.offsetWidth;
+      tip.style.left = Math.min(window.innerWidth - tw - 12, r.left + 4) + "px";
+      tip.style.top = Math.max(6, r.top - tip.offsetHeight - 8) + "px";
+    });
+    el.addEventListener("mouseleave", () => { const t = commentTip(); t.style.display = "none"; });
+  }
 }
 
 function renderAuthorsBar(runs) {
@@ -1565,48 +1595,10 @@ function lineToOffset(line, text) {
   return i;
 }
 function updateCommentMarkers() {
-  const box = commentMarksBox(); const p = currentPath(); const taV = (ta && ta.value) || "";
-  if (!box) return;
-  if (!p || !commentsList.length) { box.innerHTML = ""; return; }
-  const scrollTop = paneEditor.scrollTop;
-  const viewH = paneEditor.clientHeight;
-  const offsetTop = overlay.offsetTop; // hauteur des barres éventuelles au-dessus du textarea
-
-  // position verticale du début de la ligne d'un commentaire, mesurée réellement (garde le texte aligné)
-  const yFor = (c) => {
-    let line = c.line || 1;
-    let off = 0, l = 1;
-    if (c.start != null && c.end != null && c.end >= c.start && c.end <= taV.length) {
-      off = c.start; // le marqueur suit le début du passage si on a un ancrage précis
-    } else {
-      while (l < line && off < taV.length) { if (taV[off] === "\n") l++; off++; }
-    }
-    const yInContent = measureOffsetY(off, taV); // y absolu (paddingTop inclus)
-    return Math.round(yInContent + offsetTop); // relatif au contenu : le conteneur #commentMarks scrolle avec le texte
-  };
-
-  let html = "";
-  const counts = new Map();
-  for (const c of commentsList) { if (c && c.line) counts.set(c.line, (counts.get(c.line) || 0) + 1); }
-  const seen = new Map();
-  for (const c of commentsList) {
-    if (!c || !c.line) continue;
-    const line = c.line;
-    const idx = seen.get(line) || 0; seen.set(line, idx + 1);
-    let y = yFor(c);
-    if (seen.get(line) > 1) y += 14 * idx; // décale les bulles multiples sur la même ligne
-    const tipAuthor = escapeXml(c.authorName || c.author);
-    const tipText = escapeXml(c.text);
-    html += `<div class="cm-line" style="top:${Math.max(0, y - 1)}px;--cc:${esc(c.color || "#0891b2")}"></div>
-      <div class="cm-bubble" data-line="${line}" style="top:${Math.max(0, y - 11)}px;background:${esc(c.color || "#0891b2")}" title="${tipAuthor}">
-        ${counts.get(line) > 1 ? `<span class="cm-count">${counts.get(line)}</span>` : svg("comment")}
-        <span class="cm-tip"><span class="cm-tip-author"><i style="background:${esc(c.color || "#0891b2")}"></i>${tipAuthor}</span><span class="cm-tip-text">${tipText}</span></span>
-      </div>`;
-  }
-  box.innerHTML = html;
-  for (const b of $$(".cm-bubble", box)) {
-    b.onclick = () => { focusCommentAt(+b.dataset.line); };
-  }
+  // La bulle et le trait de la marge ont été retirés : seuls le texte souligné
+  // et l'infobulle au survol (voir bindOverlayCommentHover) gardent les commentaires visibles.
+  const box = commentMarksBox();
+  if (box) box.innerHTML = "";
 }
 
 // Mesure la position verticale (px) du début de la ligne contenant `offset` dans `text`,
@@ -1620,7 +1612,8 @@ function measureOffsetY(offset, text) {
   m.style.paddingTop = cs.paddingTop; m.style.paddingBottom = "0px"; // pas de padding bas (décalerait la mesure)
   const w = ta.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
   m.style.width = w + "px";
-  m.textContent = text.slice(0, Math.max(1, offset));
+  // on inclut le premier caractère de la ligne cible pour forcer le \n précédent à compter une ligne
+  m.textContent = text.slice(0, Math.min(Math.max(offset, 0) + 1, text.length));
   document.body.appendChild(m);
   const lh = parseFloat(getComputedStyle(m).lineHeight) || 16;
   const h = m.getBoundingClientRect().height;
@@ -1641,7 +1634,7 @@ function focusCommentAt(line) {
   if (hl) hl.scrollIntoView({ block: "center" });
 }
 // re-positionnement au défilement
-paneEditor.addEventListener("scroll", () => requestAnimationFrame(updateCommentMarkers), { passive: true });
+paneEditor.addEventListener("scroll", () => requestAnimationFrame(() => { updateCommentMarkers(); renderLineNums(); }), { passive: true });
 
 // insère des cartes de commentaires dans l'aperçu, sous le paragraphe concerné
 function injectPreviewComments() {
@@ -1677,8 +1670,33 @@ function injectPreviewComments() {
 }
 function refreshCommentAnchors() {
   updateCommentMarkers();
+  renderLineNums();
   injectPreviewComments();
 }
+
+// Numéros de ligne dans la marge gauche, alignés verticalement avec le texte de l'éditeur.
+function renderLineNums() {
+  const box = $("#lineNums"); if (!box) return;
+  const taV = (ta && ta.value) || "";
+  const count = taV.length ? taV.split("\n").length : 0;
+  if (!S || !S.loaded || !count) { box.innerHTML = ""; return; }
+  const ov = $("#overlay");
+  const padL = parseFloat(getComputedStyle(ta).paddingLeft) || 48;
+  const width = Math.max(30, Math.min(46, padL - 8)); // tient dans la marge gauche du texte
+  box.style.width = width + "px";
+  box.style.left = (ov.offsetLeft + padL - width) + "px";
+  box.style.top = (ov.offsetTop - 2) + "px";
+  box.style.height = (ta.offsetHeight + 4) + "px";
+  let html = "";
+  for (let i = 1; i <= count; i++) html += `<span class="ln" data-l="${i}"></span>`;
+  box.innerHTML = html;
+  for (const n of $$(".ln", box)) {
+    const line = +n.dataset.l;
+    n.style.top = measureOffsetY(lineOffset(line, taV), taV) + "px";
+    n.textContent = String(line);
+  }
+}
+function lineOffset(line, text) { let i = 0, l = 1; while (l < line && i < text.length) { if (text[i] === "\n") l++; i++; } return i; }
 
 $("#btnComments").onclick = toggleComments;
 $("#btnCommentsClose").onclick = closeComments;
