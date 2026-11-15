@@ -1209,10 +1209,11 @@ function renderTOC() {
   const stash = document.createElement("div"); stash.innerHTML = marked.parse(ta.value || "");
   const heads = [...stash.querySelectorAll("h1,h2,h3,h4")].map((h) => ({ level: +h.tagName[1], text: h.textContent, id: h.id }));
   if (!heads.length) return;
+  const headLines = tocHeadingLines(ta.value || ""); // numéros de ligne 1-based de chaque titre (même ordre que `heads`)
   const wrap = document.createElement("div"); wrap.className = "toc"; wrap.id = "toc";
-  wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
+  wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" data-line="${headLines[i]}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
   document.body.appendChild(wrap); tocBar = wrap;
-  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(0); closeToc(); };
+  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(Number(b.dataset.line || 1) || 1); closeToc(); };
   $(".toc-close", wrap).onclick = (e) => { e.stopPropagation(); closeToc(); };
   // mise en évidence du titre courant
   const obs = new IntersectionObserver((entries) => {
@@ -1226,6 +1227,30 @@ function renderTOC() {
 }
 function closeToc() { if (tocBar) { tocBar._obs && tocBar._obs.disconnect(); tocBar.remove(); tocBar = null; } }
 $("#btnToc").onclick = () => renderTOC();
+
+// Renvoie la liste des numéros de ligne (1-based) des titres ATX (#…, H1-H4) du markdown source,
+// dans l'ordre correspondant aux <h*> générés par marked.parse (titres de type setext ignorés :
+// trop ambigus — --- est aussi un séparateur horizontal).
+function tocHeadingLines(md) {
+  const src = md.split("\n"); const out = [];
+  const globals = new Set(); // colonnes de ``` et ~~~ actives
+  for (let i = 0; i < src.length; i++) {
+    const s = src[i];
+    // bascule de bloc de code
+    const fence = s.trim().match(/^(`{3,}|~{3,})/);
+    if (fence) {
+      const m = fence[1][0];
+      if (globals.has(m + fence[1].length)) globals.delete(m + fence[1].length);
+      else globals.add(m + fence[1].length);
+      continue;
+    }
+    if (globals.size) { continue; }
+    // atx : # ou ## ou ### ou ####
+    const m = s.match(/^\s{0,3}(#{1,4})\s+(.+)$/);
+    if (m) { out.push(i + 1); continue; }
+  }
+  return out;
+}
 
 /* ---- Aide raccourcis ---- */
 function showShortcuts() {
