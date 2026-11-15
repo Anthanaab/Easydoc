@@ -32,9 +32,10 @@
       <div class="side-tools">
         <label class="search">
           <span data-icon="search"></span>
-          <input id="search" type="search" placeholder="Rechercher" autocomplete="off" />
+          <input id="search" type="search" placeholder="Rechercher partout (Ctrl K)" autocomplete="off" />
           <kbd>Ctrl K</kbd>
         </label>
+        <div class="search-results" id="searchResults" hidden></div>
         <div class="tool-row">
           <button class="btn btn-primary" id="btnNew"><span data-icon="plus"></span>Nouveau document</button>
           <button class="btn btn-icon" id="btnUpload" title="Importer des fichiers (PDF, Word, images…)"><span data-icon="upload"></span></button>
@@ -68,6 +69,8 @@
           <button data-view="split" title="Côte à côte"><span data-icon="columns"></span><span class="lbl">Côte à côte</span></button>
           <button data-view="preview" title="Aperçu"><span data-icon="eye"></span><span class="lbl">Aperçu</span></button>
         </div>
+        <button class="icon-btn" id="btnCopyLink" title="Copier le lien vers ce document (Ctrl+L)" hidden><span data-icon="link"></span></button>
+        <button class="icon-btn" id="btnToc" title="Table des matières (aperçu)" hidden><span data-icon="list"></span></button>
         <button class="icon-btn" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
         <button class="icon-btn" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
         <button class="icon-btn" id="btnAccess" title="Qui peut voir ou modifier ce fichier" hidden><span data-icon="lock"></span></button>

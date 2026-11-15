@@ -889,6 +889,48 @@ app.get("/api/people", (_req, res) => {
   res.json({ ok: true, people: users.all().map((u) => ({ key: keyOfUser(u), username: u.username, name: u.displayName })) });
 });
 
+// Recherche dans le contenu des documents (respecte les droits : les fichiers masqués sont ignorés).
+app.get("/api/search", async (req, res) => {
+  const q = String(req.query.q || "").trim().slice(0, 120);
+  if (!q) return res.json({ ok: true, results: [] });
+  try {
+    const all = await repo.listFiles();
+    const out = [];
+    let scanned = 0;
+    for (const f of all) {
+      if (!isEditable(f.path) || !access.can(req.user, f.path, "read")) continue;
+      if (++scanned > 200) break;
+      try {
+        const r = await repo.readFile(f.path);
+        if (!r) continue;
+        const text = r.content;
+        const lower = text.toLowerCase(), needle = q.toLowerCase();
+        let from = 0;
+        for (let k = 0; k < 25; k++) {
+          const idx = lower.indexOf(needle, from);
+          if (idx < 0) break;
+          // extrait la ligne entière autour du match
+          let ls = text.lastIndexOf("\n", idx - 1) + 1;
+          let le = text.indexOf("\n", idx);
+          if (le < 0) le = text.length;
+          const line = text.slice(ls, le);
+          const lineNo = text.slice(0, ls).split("\n").length;
+          const at = idx - ls;              // position du match dans la ligne
+          const start = Math.max(0, at - 25), end = Math.min(line.length, at + q.length + 40);
+          const clean = (str) => str.replace(/\*\*|__|`/g, ""); // enlève les balises markdown du raccourci
+          const s1 = (start > 0 ? "…" : "") + clean(line.slice(start, at));
+          const s2 = clean(line.slice(at, at + q.length));
+          const s3 = clean(line.slice(at + q.length, end));
+          out.push({ path: f.path, line: lineNo, snippet: s1 + s2 + s3 + (end < line.length ? "…" : "") });
+          from = idx + Math.max(needle.length, 1);
+        }
+      } catch (_e) {}
+      if (out.length >= 30) break;
+    }
+    res.json({ ok: true, results: out });
+  } catch (e) { bad(res, 500, "Recherche impossible : " + e.message); }
+});
+
 app.get("/api/history", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
   if (!p) return bad(res, 400, "Chemin invalide.");
@@ -913,6 +955,30 @@ app.get("/api/history/diff", async (req, res) => {
     const d = await repo.commitDiff(p, String(req.query.sha || ""));
     res.json({ ok: true, patch: String(d.patch || "").slice(0, 400000), binary: !!d.binary, status: d.status });
   } catch (e) { bad(res, 400, e.message); }
+});
+
+// Restaure un document à une version antérieure de son historique.
+app.post("/api/restore", async (req, res) => {
+  const v = safeFilePath(String(req.body.path || ""));
+  const sha = String(req.body.sha || "");
+  if (!v) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, v, "write")) return;
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return bad(res, 400, "Version invalide.");
+  try {
+    const content = await repo.readAt(v, sha); // null si la version n'existe pas à ce commit
+    if (content === null) return bad(res, 404, "Ce document n'existe pas à cette version.");
+    const msg = `Easydoc : restauration de ${v} (${req.user.displayName})`;
+    const r = await repo.writeFile(v, content, msg);
+    // recharge la version live (si le document est ouvert) puis notifie les autres clients
+    const live = yws.docs.get(v);
+    if (live && live.getMap("meta").get("loaded")) {
+      const s2 = st(v);
+      s2.lastCommitted = null; s2.lastRemote = content; s2.baseUpdate = null;
+      live.transact(() => { applyDiff(live.getText(TEXT), content); live.getMap("meta").set("restoredAt", Date.now()); }, SERVER);
+    }
+    bump("treeVersion");
+    res.json({ ok: true, committed: r.committed, content });
+  } catch (e) { bad(res, 500, e.message); }
 });
 
 app.post("/api/sync", async (_req, res) => {

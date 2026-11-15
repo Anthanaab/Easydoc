@@ -1,3 +1,25 @@
+/* ==== confort & recherche ==== */
+.search { position: relative; }
+.search-results { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); box-shadow: 0 8px 24px rgba(0,0,0,.10); max-height: 320px; overflow: auto; padding: 4px; }
+.search-results .sr-hint { padding: 6px 8px; color: var(--muted); font-size: 12px; }
+.search-results .sr { display: block; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.search-results .sr:hover { background: var(--bg-hover); }
+.search-results .sr .p { font-weight: 600; font-size: 12.5px; display: flex; justify-content: space-between; gap: 8px; }
+.search-results .sr .ln { color: var(--muted); font-weight: 400; }
+.search-results .sr em { font-style: normal; color: var(--accent); border-radius: 2px; }
+.search-results .sr .x { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+.toc { position: fixed; right: 16px; top: 64px; width: 250px; max-height: 60vh; overflow: auto; z-index: 30; }
+.toc-inner { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 10px 24px rgba(0,0,0,.12); padding: 8px 6px; font-size: 12.5px; }
+.toc h4 { margin: 2px 6px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.toc-inner button { display: block; width: 100%; text-align: left; padding: 3px 8px; border: 0; background: none; color: var(--text-2); border-left: 2px solid transparent; cursor: pointer; line-height: 1.35; }
+.toc-inner button:hover { color: var(--text); }
+.toc-inner button.on { color: var(--accent-text); border-left-color: var(--accent); }
+.toc-inner button.h1- { font-weight: 700; } .toc-inner button.h2- { padding-left: 16px; } .toc-inner button.h3- { padding-left: 24px; }
+.kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); color: var(--text); font-size: 11px; font-family: inherit; }
+.khelp td { padding: 5px 8px; }
+.khelp td:first-child { white-space: nowrap; text-align: right; color: var(--muted); }
+.khelp tr:first-child td { padding-top: 0; }
 /* Easydoc — interface. Thème clair par défaut, thème sombre au choix (data-theme sur <html>). */
 
 :root {

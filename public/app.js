@@ -55,12 +55,14 @@ const ICONS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
   unlink: '<path d="m18.84 12.25 1.72-1.71a4.95 4.95 0 0 0-7-7l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a4.95 4.95 0 0 0 7 7l1.71-1.71"/><path d="M8 2v3"/><path d="M2 8h3"/><path d="M16 22v-3"/><path d="M22 16h-3"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   highlight: '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -1114,20 +1116,167 @@ async function openHistory() {
             <span class="chev">${svg("chevron")}</span></button>
           <div class="hdiff" hidden></div></div>`;
       }).join("");
+      const writable = canWrite(p);
       for (const item of $$(".hitem", box)) {
-        $(".hrow", item).onclick = async () => {
+        $(".hrow", item).onclick = () => {
           const diff = $(".hdiff", item);
           const open = item.classList.toggle("open");
           diff.hidden = !open;
           if (!open || diff.dataset.loaded) return;
           diff.innerHTML = '<div class="loadingview">Chargement…</div>';
-          try {
-            const r = await api("GET", `/api/history/diff?path=${encodeURIComponent(p)}&sha=${encodeURIComponent(item.dataset.sha)}`);
+          api("GET", `/api/history/diff?path=${encodeURIComponent(p)}&sha=${encodeURIComponent(item.dataset.sha)}`).then((r) => {
             diff.dataset.loaded = "1";
-            diff.innerHTML = r.patch ? patchHTML(r.patch) : `<div class="muted-sm" style="padding:10px 12px">${r.binary ? "Fichier binaire : pas de détail ligne par ligne." : "Aucune modification de contenu dans cette version."}</div>`;
-          } catch (e) { diff.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+            diff.innerHTML = (r.patch ? patchHTML(r.patch) : `<div class="muted-sm" style="padding:10px 12px">${r.binary ? "Fichier binaire : pas de détail ligne par ligne." : "Aucune modification de contenu dans cette version."}</div>`)
+              + (writable ? `<div class="hist-restore"><button class="btn btn-danger-soft" data-act="restore" data-sha="${esc(item.dataset.sha)}">${svg("download")}Revenir à cette version</button></div>` : "");
+            const rb = $('[data-act="restore"]', diff);
+            if (rb) rb.onclick = () => confirmRestore(p, rb.dataset.sha, item.dataset.date);
+          }).catch((e) => { diff.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
         };
       }
+    },
+  });
+}
+
+/* ============================================================================================
+ * Confort : recherche dans le contenu, lien, table des matières, aide clavier
+ * ========================================================================================== */
+const srBox = $("#searchResults");
+let srTimer = null, srSeq = 0;
+function renderSearchResults() {
+  const q = $("#search").value.trim();
+  const tree = $("#tree");
+  if (!q) { srBox.hidden = true; srBox.innerHTML = ""; renderTree(); return; }
+  tree.innerHTML = '<div class="tree-empty">Recherche…</div>';
+  srBox.hidden = false;
+  const seq = ++srSeq;
+  srBox.innerHTML = '<div class="sr-hint">Recherche dans le contenu…</div>';
+  clearTimeout(srTimer);
+  srTimer = setTimeout(async () => {
+    if (seq !== srSeq) return;
+    try {
+      const d = await api("GET", "/api/search?q=" + encodeURIComponent(q));
+      if (seq !== srSeq) return;
+      if (!d.results.length) { srBox.innerHTML = '<div class="sr-hint">Aucun résultat dans le contenu.</div>'; return; }
+      const escQ = esc(q);
+      srBox.innerHTML = d.results.map((r) => {
+        const escR = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // échappe la requête pour le RegExp
+        const rx = new RegExp("(" + escR + ")", "ig");
+        const snip = esc(r.snippet).replace(rx, "<em>$1</em>");
+        const dot = dirName(r.path) ? `<span class="ln">· ${esc(dirName(r.path))}</span>` : "";
+        return `<button class="sr" data-path="${esc(r.path)}" data-line="${r.line}">
+          <span class="p"><span>${esc(displayName(r.path))}${dot}</span><span class="ln">ligne ${r.line}</span></span>
+          <span class="x">${snip}</span></button>`;
+      }).join("");
+      for (const el of $$(".sr", srBox)) {
+        el.onclick = () => { openFile(el.dataset.path); goToLine(Number(el.dataset.line)); srBox.hidden = true; $("#search").value = ""; renderTree(); };
+      }
+    } catch (e) { if (seq === srSeq) srBox.innerHTML = `<div class="sr-hint">${esc(e.message)}</div>`; }
+  }, 250);
+}
+$("#search").addEventListener("input", renderSearchResults);
+$("#search").addEventListener("focus", renderSearchResults);
+$("#search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { $("#search").value = ""; $("#search").blur(); renderSearchResults(); }
+});
+document.addEventListener("click", (e) => { if (srBox && !srBox.hidden && !e.target.closest(".search") && !e.target.closest(".sr")){ srBox.hidden = true; } });
+
+async function copyLink() {
+  const p = currentPath();
+  if (!p) return;
+  const url = location.origin + location.pathname + "#/" + encPath(p);
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Lien copié : " + fileName(p));
+  } catch (_e) {
+    // repli sans permission (http non sécurisé…)
+    const tx = document.createElement("textarea"); tx.value = url; document.body.appendChild(tx); tx.select();
+    try { document.execCommand("copy"); toast("Lien copié : " + fileName(p)); } catch (_e2) { prompt("Lien du document :", url); }
+    tx.remove();
+  }
+}
+$("#btnCopyLink").onclick = copyLink;
+
+/* ---- Table des matières flottante (aperçu Markdown) ---- */
+let tocBar = null;
+function renderTOC() {
+  try {
+  if (tocBar) tocBar.remove();
+  tocBar = null;
+  const visible = !!(S && S.kind === "markdown" && !S.offline && currentView() !== "edit");
+  $("#btnToc").hidden = !visible;
+  if (!visible) return;
+  if (tocBar) closeToc(); // ne pas dupliquer si une barre existe déjà
+  const stash = document.createElement("div"); stash.innerHTML = marked.parse(ta.value || "");
+  const heads = [...stash.querySelectorAll("h1,h2,h3,h4")].map((h) => ({ level: +h.tagName[1], text: h.textContent, id: h.id }));
+  if (!heads.length) return;
+  const wrap = document.createElement("div"); wrap.className = "toc"; wrap.id = "toc";
+  wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
+  document.body.appendChild(wrap); tocBar = wrap;
+  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(0); closeToc(); };
+  $(".toc-close", wrap).onclick = (e) => { e.stopPropagation(); closeToc(); };
+  // mise en évidence du titre courant
+  const obs = new IntersectionObserver((entries) => {
+    let cur = null;
+    for (const en of entries) if (en.isIntersecting) cur = en.target;
+    for (const b of $$("button", wrap)) b.classList.toggle("on", b.dataset.i === (cur ? cur.dataset.i : "0"));
+  }, { root: paneEditor, rootMargin: "0px 0px -80% 0px" });
+  for (const b of $$("button", wrap)) { b.dataset.i = b.dataset.i; obs.observe(b); }
+  wrap._obs = obs;
+  } catch (e) { console.error("toc ERREUR:", e); }
+}
+function closeToc() { if (tocBar) { tocBar._obs && tocBar._obs.disconnect(); tocBar.remove(); tocBar = null; } }
+$("#btnToc").onclick = () => renderTOC();
+
+/* ---- Aide raccourcis ---- */
+function showShortcuts() {
+  openModal({
+    title: "Raccourcis clavier",
+    body: `<table class="khelp">
+      <tr><td>${svg("search")} ${kbd("Ctrl K")}</td><td>Rechercher un document / dans le contenu</td></tr>
+      <tr><td>${svg("link")} ${kbd("Ctrl L")}</td><td>Copier le lien du document ouvert</td></tr>
+      <tr><td>${svg("check")} ${kbd("Ctrl S")}</td><td>Enregistrer maintenant</td></tr>
+      <tr><td>${svg("pencil")} ${kbd("Ctrl Z")} / ${kbd("Ctrl Shift Z")}</td><td>Annuler / rétablir</td></tr>
+      <tr><td>${svg("highlight")} ${kbd("H")}</td><td>Qui a écrit quoi (couleurs)</td></tr>
+      <tr><td>${svg("history")} ${kbd("T")}</td><td>Historique / restaurer une version</td></tr>
+      <tr><td>${svg("plus")} ${kbd("Ctrl N")}</td><td>Nouveau document</td></tr>
+      <tr><td>${kbd("Tab")} / ${kbd("Shift Tab")}</td><td>Indenter / dé-indenter</td></tr>
+      <tr><td>${kbd("?")}</td><td>Cette aide</td></tr>
+    </table>`,
+    foot: '<button class="btn" data-act="close">Fermer</button>',
+    onMount(card) { $('[data-act="close"]', card).onclick = closeModal; },
+  });
+}
+function kbd(t) { return `<span class="kbd">${esc(t)}</span>`; }
+
+/* ---- Aller à une ligne dans le document ouvert ---- */
+function goToLine(n) {
+  if (!S || !S.loaded) return;
+  setView("edit");
+  const lines = ta.value.split("\n");
+  const target = Math.max(0, Math.min(n - 1, lines.length));
+  let pos = 0; for (let i = 0; i < target; i++) pos += lines[i].length + 1;
+  ta.focus(); ta.setSelectionRange(pos, pos); publishCursor();
+  paneEditor.scrollTop = (paneEditor.scrollHeight / lines.length) * target;
+}
+
+async function confirmRestore(p, sha) {
+  openModal({
+    title: "Revenir à cette version ?",
+    subtitle: `<strong>${esc(fileName(p))}</strong> : le contenu actuel sera remplacé par cette version plus ancienne. Un enregistrement de restauration est créé à la fin de l\'historique (tu pourras toujours revenir en arrière).`,
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-danger" data-act="ok">Restaurer</button>',
+    onMount(card) {
+      $('[data-act="cancel"]', card).onclick = closeModal;
+      $('[data-act="ok"]', card).onclick = async () => {
+        const btn = $('[data-act="ok"]', card); btn.disabled = true; btn.textContent = "Restauration…";
+        try {
+          const r = await api("POST", "/api/restore", { path: p, sha });
+          closeModal();
+          toast("Document restauré à cette version.");
+          // recharge la version live
+          refreshTree();
+          if (currentPath() === p && S) openFile(p, { force: true });
+        } catch (e) { setMsg(card, e.message, "err"); btn.disabled = false; btn.textContent = "Restaurer"; }
+      };
     },
   });
 }
@@ -1159,6 +1308,8 @@ $("#preview").addEventListener("click", (e) => {
 
 function setView(v) {
   area.dataset.view = v;
+  renderTOC();
+  updateButtons();
   localStorage.setItem("ed-view", v);
   for (const b of $$("#viewSwitch button")) b.classList.toggle("on", b.dataset.view === v);
   renderPreview();
@@ -1213,6 +1364,7 @@ function updateButtons() {
   $("#btnAccess").hidden = !(isAdmin() && p);
   $("#btnAuthors").hidden = !(S && S.loaded && !S.offline);
   $("#btnHistory").hidden = !p;
+  $("#btnCopyLink").hidden = !p;
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
@@ -1769,6 +1921,8 @@ window.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(true); }
   if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); $("#search").focus(); $("#search").select(); }
+  if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); copyLink(); }
+  if (e.key === "?") { e.preventDefault(); showShortcuts(); }
 });
 window.addEventListener("hashchange", () => {
   const p = pathFromHash();
