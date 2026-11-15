@@ -1261,7 +1261,7 @@ function renderTOC() {
   const wrap = document.createElement("div"); wrap.className = "toc"; wrap.id = "toc";
   wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" data-line="${headLines[i]}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
   document.body.appendChild(wrap); tocBar = wrap;
-  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(Number(b.dataset.line || 1) || 1); closeToc(); };
+  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(Number(b.dataset.line || 1) || 1); b.scrollIntoView({ block: "nearest" }); };
   $(".toc-close", wrap).onclick = (e) => { e.stopPropagation(); closeToc(); };
   // mise en évidence du titre courant
   const obs = new IntersectionObserver((entries) => {
@@ -1568,25 +1568,33 @@ function updateCommentMarkers() {
   const box = commentMarksBox(); const p = currentPath(); const taV = (ta && ta.value) || "";
   if (!box) return;
   if (!p || !commentsList.length) { box.innerHTML = ""; return; }
-  // Fonction approximative : position verticale (en px) du début d'une ligne dans le contenu du textarea
-  const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 17;
-  const contentH = ta.scrollHeight, viewH = paneEditor.clientHeight;
   const scrollTop = paneEditor.scrollTop;
-  const padTop = parseFloat(getComputedStyle(ta).paddingTop) || 0;
-  const totLines = taV.split("\n").length;
+  const viewH = paneEditor.clientHeight;
+  const offsetTop = overlay.offsetTop; // hauteur des barres éventuelles au-dessus du textarea
+
+  // position verticale du début de la ligne d'un commentaire, mesurée réellement (garde le texte aligné)
+  const yFor = (c) => {
+    let line = c.line || 1;
+    let off = 0, l = 1;
+    if (c.start != null && c.end != null && c.end >= c.start && c.end <= taV.length) {
+      off = c.start; // le marqueur suit le début du passage si on a un ancrage précis
+    } else {
+      while (l < line && off < taV.length) { if (taV[off] === "\n") l++; off++; }
+    }
+    const yInContent = measureOffsetY(off, taV); // y absolu (paddingTop inclus)
+    return Math.round(yInContent + offsetTop); // relatif au contenu : le conteneur #commentMarks scrolle avec le texte
+  };
+
   let html = "";
   const counts = new Map();
-  for (const c of commentsList) {
-    if (!c || !c.line) continue;
-    counts.set(c.line, (counts.get(c.line) || 0) + 1);
-  }
-  const seen = new Map(); // line -> index
+  for (const c of commentsList) { if (c && c.line) counts.set(c.line, (counts.get(c.line) || 0) + 1); }
+  const seen = new Map();
   for (const c of commentsList) {
     if (!c || !c.line) continue;
     const line = c.line;
     const idx = seen.get(line) || 0; seen.set(line, idx + 1);
-    const ratio = totLines > 1 ? Math.min(1, (line - 1) / (totLines - 1)) : 0;
-    const y = padTop + ratio * (contentH - viewH) - scrollTop;
+    let y = yFor(c);
+    if (seen.get(line) > 1) y += 14 * idx; // décale les bulles multiples sur la même ligne
     const tip = escapeXml(c.authorName || c.author) + " — " + escapeXml(c.text);
     html += `<div class="cm-line" style="top:${Math.max(0, y - 1)}px;--cc:${esc(c.color || "#0891b2")}"></div>
       <div class="cm-bubble" data-line="${line}" style="top:${Math.max(0, y - 11)}px;background:${esc(c.color || "#0891b2")}" title="${c.authorName || c.author}">
@@ -1594,11 +1602,29 @@ function updateCommentMarkers() {
         <span class="cm-tip">${tip}</span>
       </div>`;
   }
-  // on évite les doublons d'id : les bulles n'ont pas d'id, uniquement data-line
   box.innerHTML = html;
   for (const b of $$(".cm-bubble", box)) {
     b.onclick = () => { focusCommentAt(+b.dataset.line); };
   }
+}
+
+// Mesure la position verticale (px) du début de la ligne contenant `offset` dans `text`,
+// avec le rendu exact du textarea (paddingTop inclus, paddingBottom à 0 pour ne pas décaler).
+function measureOffsetY(offset, text) {
+  const cs = getComputedStyle(ta);
+  const m = document.createElement("div");
+  m.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;display:block;";
+  m.style.font = cs.font; m.style.lineHeight = cs.lineHeight; m.style.letterSpacing = cs.letterSpacing;
+  m.style.paddingLeft = cs.paddingLeft; m.style.paddingRight = cs.paddingRight;
+  m.style.paddingTop = cs.paddingTop; m.style.paddingBottom = "0px"; // pas de padding bas (décalerait la mesure)
+  const w = ta.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  m.style.width = w + "px";
+  m.textContent = text.slice(0, Math.max(1, offset));
+  document.body.appendChild(m);
+  const lh = parseFloat(getComputedStyle(m).lineHeight) || 16;
+  const h = m.getBoundingClientRect().height;
+  m.remove();
+  return Math.max(0, h - lh); // y absolu (avec paddingTop) du début de la ligne
 }
 function escapeXml(s) { return esc(String(s)); }
 function focusCommentAt(line) {
