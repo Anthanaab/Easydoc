@@ -429,6 +429,7 @@ function renderTree() {
  * ========================================================================================== */
 const ta = $("#editor");
 const paneEditor = $("#paneEditor");
+const panePreview = $("#panePreview");
 const area = $("#area");
 const marked = new Marked({ gfm: true, breaks: true });
 let S = null; // document en cours d'édition
@@ -436,6 +437,24 @@ let F = null; // fichier affiché (PDF, Word, image…)
 
 function setArea(state, kind = "") { area.dataset.state = state; area.dataset.kind = kind; }
 function currentView() { return area.dataset.view; }
+
+/* ---- Défilement synchronisé des deux panneaux en vue côte-à-côte ---- */
+let _scrollSync = false; // garde anti-boucle
+function syncPane(from, to) {
+  if (_scrollSync || !S || currentView() !== "split") return;
+  const max1 = from.scrollHeight - from.clientHeight;
+  const max2 = to.scrollHeight - to.clientHeight;
+  if (max1 <= 0 || max2 <= 0) return;
+  const ratio = Math.min(1, Math.max(0, from.scrollTop / max1));
+  _scrollSync = true;
+  to.scrollTop = ratio * max2;
+  requestAnimationFrame(() => { _scrollSync = false; });
+}
+function bindPanScroll() {
+  paneEditor.addEventListener("scroll", () => requestAnimationFrame(() => syncPane(paneEditor, panePreview)), { passive: true });
+  panePreview.addEventListener("scroll", () => requestAnimationFrame(() => syncPane(panePreview, paneEditor)), { passive: true });
+}
+bindPanScroll();
 
 function autosize() {
   const st = paneEditor.scrollTop;
