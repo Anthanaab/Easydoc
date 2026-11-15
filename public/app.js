@@ -1292,7 +1292,9 @@ function kbd(t) { return `<span class="kbd">${esc(t)}</span>`; }
 /* ---- Aller à une ligne dans le document ouvert ---- */
 function goToLine(n) {
   if (!S || !S.loaded) return;
-  setView("edit");
+  // ne force pas la vue : on garde la vue courante (édition OU côte-à-côte).
+  // Seul le mode aperçu (sans éditeur visible) bascule en édition pour montrer le curseur.
+  if (currentView() === "preview") setView("edit");
   const lines = ta.value.split("\n");
   const target = Math.max(0, Math.min(n - 1, lines.length));
   let pos = 0; for (let i = 0; i < target; i++) pos += lines[i].length + 1;
