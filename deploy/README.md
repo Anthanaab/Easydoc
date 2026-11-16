@@ -52,7 +52,7 @@ Options : `EASYDOC_DRYRUN=1` (simulation, rien n'est créé), `EASYDOC_PORT=8080
 
 ## Ce que fait provision.sh
 
-1. Installe Node.js ≥ 18 (NodeSource, sinon le paquet de la distribution).
+1. Installe Node.js ≥ 22 (NodeSource, sinon le paquet de la distribution).
 2. Récupère le code dans `/opt/easydoc` (clone, ou mise à jour forcée sur la branche : un fichier
    modifié localement ne bloque plus la mise à jour).
 3. Crée `/opt/easydoc/.env` au premier passage uniquement ; `data/` (dépôt connecté, jeton,

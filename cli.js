@@ -71,6 +71,7 @@ function usage(code = 1) {
       meta: { version: pkg.version, motif: "ligne de commande" } });
     console.log(`Sauvegarde : ${dest} (${r.files} fichiers, ${Math.round(r.bytes / 1024)} Ko)`);
     console.log("Restaurer : arrêter Easydoc, puis  tar -xzf <archive> -C " + DATA_DIR + "  et relancer Easydoc.");
+    if (process.env.LOCAL_REPO_DIR) console.log(`Le dépôt local est rangé dans « localrepo/ » de l'archive : à déplacer ensuite vers ${process.env.LOCAL_REPO_DIR}.`);
     return;
   }
 

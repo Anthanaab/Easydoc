@@ -7,3 +7,4 @@ export { WebsocketProvider } from "y-websocket";
 export { default as DOMPurify } from "dompurify";
 export { createEditor } from "./editor.js";
 export { structuredPatch, applyPatch } from "diff"; // fusion des modifications faites pendant une coupure
+export { markdownToHtml, tablesIn } from "./markdown-html.js"; // impression, export, aperçu, tableaux

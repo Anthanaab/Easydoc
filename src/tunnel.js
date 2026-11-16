@@ -108,6 +108,10 @@ class TunnelManager {
     const local = path.join(this.binDir, "cloudflared");
     try { fs.accessSync(local, fs.constants.X_OK); this.state.binary = "téléchargé"; return local; } catch (_e) {}
     await this.download(local);
+    // dossier de données monté « noexec » : le programme ne pourra jamais être lancé, inutile
+    // de le retélécharger à chaque essai
+    try { fs.accessSync(local, fs.constants.X_OK); }
+    catch (_e) { throw new Error(`cloudflared a été téléchargé dans ${this.binDir} mais ne peut pas y être exécuté (disque monté sans droit d'exécution ?) : installe cloudflared sur le système.`); }
     this.state.binary = "téléchargé";
     return local;
   }
@@ -180,9 +184,10 @@ class TunnelManager {
     this.state.connections.clear();
     this.setStatus("starting", "");
     this.log("Démarrage du tunnel…");
-    const child = spawn(bin, ["tunnel", "--no-autoupdate", "run"], {
-      env: { ...process.env, TUNNEL_TOKEN: this.cfg.token }, stdio: ["ignore", "pipe", "pipe"],
-    });
+    // environnement minimal : cloudflared ne reçoit ni le jeton GitHub ni les autres réglages d'Easydoc
+    const env = { TUNNEL_TOKEN: this.cfg.token };
+    for (const k of ["PATH", "HOME", "TMPDIR", "TZ", "LANG", "SYSTEMROOT", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"]) if (process.env[k]) env[k] = process.env[k];
+    const child = spawn(bin, ["tunnel", "--no-autoupdate", "run"], { env, stdio: ["ignore", "pipe", "pipe"] });
     this.child = child;
     this.state.since = Date.now();
     let buf = "";
@@ -193,8 +198,18 @@ class TunnelManager {
     };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
-    child.on("error", (e) => { this.log(e.message); this.setStatus("error", e.message); });
+    // lancement impossible (droits, fichier absent…) : Node signale « error » sans jamais « exit »
+    child.on("error", (e) => {
+      this.log(e.message);
+      this.setStatus("error", e.message);
+      if (child.pid === undefined) {
+        if (this.child === child) this.child = null;
+        child.emit("easydoc-gone");
+        this.scheduleRetry();
+      }
+    });
     child.on("exit", (code, sig) => {
+      child.emit("easydoc-gone");
       if (this.child === child) this.child = null;
       this.state.connections.clear();
       if (this.stopping || !this.enabled) { this.setStatus("off"); return; }
@@ -219,9 +234,11 @@ class TunnelManager {
     const child = this.child;
     if (!child) { if (!keepState) this.setStatus("off", ""); return Promise.resolve(); }
     return new Promise((res) => {
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return res(); // jamais lancé, ou déjà arrêté
       const t = setTimeout(() => { try { child.kill("SIGKILL"); } catch (_e) {} }, 5000);
-      child.once("exit", () => { clearTimeout(t); res(); });
-      try { child.kill("SIGTERM"); } catch (_e) { clearTimeout(t); res(); }
+      const done = setTimeout(res, 8000); // au pire : l'arrêt d'Easydoc n'attend pas indéfiniment
+      child.once("easydoc-gone", () => { clearTimeout(t); clearTimeout(done); res(); });
+      try { child.kill("SIGTERM"); } catch (_e) { clearTimeout(t); clearTimeout(done); res(); }
     }).then(() => { this.child = null; if (!keepState) this.setStatus("off", ""); });
   }
 

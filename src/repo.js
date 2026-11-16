@@ -146,7 +146,7 @@ class RepoService {
         const full = path.join(dir, ent.name);
         const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
         if (ent.isDirectory()) walk(full, rel);
-        else if (ent.isFile() && safeFilePath(rel) === rel) out.push({ path: rel, size: fs.statSync(full).size });
+        else if (ent.isFile() && safeFilePath(rel) === rel) { const st = fs.statSync(full); out.push({ path: rel, size: st.size, mtime: Math.round(st.mtimeMs) }); }
       }
     };
     walk(this.options.localRepoDir, "");
@@ -281,6 +281,46 @@ class RepoService {
     return { moved: pairs.length };
   }
 
+  /**
+   * Ajoute plusieurs NOUVEAUX fichiers en un seul commit : files = [{ rel, buf }, …].
+   * Refuse si l'un d'eux existe déjà (rien n'est écrasé).
+   */
+  async addFiles(files, message, opts = {}) {
+    if (!files.length) return { added: 0 };
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const branch = this.options.githubBranch;
+      const { data: ref } = await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+      const { data: head } = await this.octokit.rest.git.getCommit({ owner, repo, commit_sha: ref.object.sha });
+      const { data: tree } = await this.octokit.rest.git.getTree({ owner, repo, tree_sha: head.tree.sha, recursive: "1" });
+      const taken = new Set(tree.tree.map((t) => t.path.toLowerCase()));
+      const entries = [];
+      for (const f of files) {
+        if (taken.has(f.rel.toLowerCase()) && !opts.overwrite) throw new Error(`Un fichier porte déjà ce nom : ${f.rel}`);
+        const { data: blob } = await this.octokit.rest.git.createBlob({ owner, repo, content: toBuf(f.buf).toString("base64"), encoding: "base64" });
+        entries.push({ path: f.rel, mode: "100644", type: "blob", sha: blob.sha });
+      }
+      const { data: newTree } = await this.octokit.rest.git.createTree({ owner, repo, base_tree: head.tree.sha, tree: entries });
+      const { data: commit } = await this.octokit.rest.git.createCommit({ owner, repo, message, tree: newTree.sha, parents: [ref.object.sha] });
+      await this.octokit.rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: commit.sha });
+      return { added: files.length, commit: commit.sha };
+    }
+    const fulls = files.map((f) => this._local(f.rel));
+    if (!opts.overwrite) for (let i = 0; i < files.length; i++) if (fs.existsSync(fulls[i])) throw new Error(`Un fichier porte déjà ce nom : ${files[i].rel}`);
+    for (let i = 0; i < files.length; i++) {
+      fs.mkdirSync(path.dirname(fulls[i]), { recursive: true });
+      fs.writeFileSync(fulls[i], toBuf(files[i].buf), { flag: opts.overwrite ? "w" : "wx" });
+    }
+    try {
+      await this.git.raw(["add", "--", ...files.map((f) => f.rel)]);
+      await this.git.commit(message);
+    } catch (e) { console.error("[git] ajout :", e.message.split("\n")[0]); }
+    return { added: files.length };
+  }
+
+  /** Modifie (ou crée) plusieurs fichiers en un seul commit. */
+  writeFiles(files, message) { return this.addFiles(files, message, { overwrite: true }); }
+
   async deleteFile(rel, message) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
@@ -360,7 +400,8 @@ class RepoService {
       const f = (data.files || []).find((x) => x.filename === rel || x.previous_filename === rel);
       return f ? { patch: f.patch || "", binary: !f.patch && f.changes > 0, status: f.status } : { patch: "", status: "absent" };
     }
-    const out = await this.git.raw(["show", "--format=", "--no-color", "--find-renames", sha, "--", rel]);
+    // « ^{commit} » : seule une version (commit) est acceptée, jamais un dossier ou un fichier interne de git
+    const out = await this.git.raw(["show", "--format=", "--no-color", "--find-renames", `${sha}^{commit}`, "--", rel]);
     const i = out.indexOf("\n@@");
     return { patch: i >= 0 ? out.slice(i + 1) : "", binary: /Binary files/.test(out), status: "modified" };
   }
@@ -481,7 +522,7 @@ class RepoService {
         throw e;
       }
     }
-    try { return await this.git.binaryCatFile(["-p", `${ref}:${rel}`]); } catch (_e) { return null; }
+    try { return await this.git.binaryCatFile(["-p", `${ref}^{commit}:${rel}`]); } catch (_e) { return null; }
   }
 
   /** Crée quelques documents de départ si le dépôt est vide. */

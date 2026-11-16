@@ -25,36 +25,61 @@ en train d'être tapé.
   Claude ou d'un `git push`) et les nouveaux commentaires apparaissent en direct chez chacun.
   Le bouton *Commentaires* liste toutes les discussions (ouvertes ou résolues). Les commentaires
   restent sur le serveur (`data/comments.json`), jamais dans le dépôt.
+- **Mentions et notifications** : `@` dans un commentaire propose les personnes (`@identifiant`).
+  La personne citée, et celles qui participent déjà à une discussion quand quelqu'un y répond,
+  reçoivent une notification (cloche en bas à gauche, et un message en direct si elles sont
+  connectées) qui ouvre la discussion. Personne n'est prévenu d'un document qu'il ne voit pas.
 - **Historique** : chaque enregistrement d'un fichier, avec son auteur et le détail des lignes
-  ajoutées ou supprimées.
+  ajoutées ou supprimées ; *Voir le document à cette version* l'affiche en entier avant de le restaurer.
+  Quand quelqu'un restaure une version, les personnes qui ont le document ouvert en sont prévenues.
 - **Enregistrement automatique** quelques secondes après la dernière frappe : un seul commit
   pour tous les participants, avec leurs noms dans le message. `Ctrl+S` enregistre tout de suite.
 - **Modifications externes** (agent IA, `git push`, autre outil) détectées toutes les 20 s
   et fusionnées en direct, sans écraser la saisie en cours. Un enregistrement ne remplace jamais
   une version du dépôt qu'Easydoc n'a pas encore intégrée : il la fusionne d'abord.
 - **Rien ne se perd** :
+  - fermer l'onglet alors que des modifications ne sont pas arrivées au serveur (connexion
+    coupée) demande une confirmation ;
   - si l'enregistrement échoue (GitHub injoignable, quota dépassé…) au moment où le document
     est fermé ou le serveur arrêté, ses modifications sont gardées dans `data/recovery` et envoyées
     au dépôt dès que possible ; rouvert entre-temps, le document repart de cet état ;
   - ce qui est tapé pendant une coupure de connexion est fusionné, au retour, avec ce que les
     autres ont écrit entre-temps ; si les mêmes lignes ont changé des deux côtés, ta version
-    s'affiche pour être recopiée.
+    s'affiche pour être recopiée. Ouvert sans temps réel (proxy mal réglé, réseau lent), un document
+    repasse tout seul en direct dès que la connexion le permet.
 - **Texte mis en forme pendant l'écriture** : titres en grand, gras, italique, listes à puces, cases à
   cocher cliquables, liens, images, citations et blocs de code s'affichent directement ; les symboles
   Markdown (`**`, `#`, `[…](…)`) ne réapparaissent que sur la ligne où se trouve le curseur. Barre de
-  mise en forme (gras, titres, listes, lien…) et raccourcis : `Ctrl+B`, `Ctrl+I`, `Ctrl+Alt+1/2/3`,
-  `Ctrl+Maj+7/8/9`, `Ctrl+E`. `Entrée` continue une liste. Les fichiers restent du Markdown standard.
+  mise en forme (gras, titres, listes, tableau, lien…) et raccourcis : `Ctrl+B`, `Ctrl+I`,
+  `Ctrl+Maj+1/2/3` (titres), `Ctrl+Maj+7/8/9` (listes), `Ctrl+E` — ils marchent aussi avec un clavier
+  AZERTY. `Entrée` continue une liste. Le nombre de mots s'affiche à côté de l'état du document. Les
+  fichiers restent du Markdown standard.
+- **Tableaux** : affichés en vrai tableau ; un clic fait réapparaître leur texte pour les modifier.
+  Le bouton *Tableau* en insère un.
 - **Rechercher et remplacer** dans le document ouvert : `Ctrl+F` (`F3` : résultat suivant), avec respect
   de la casse, mot entier ou expression régulière.
 - **Plan du document** à gauche du texte, ouvert par défaut quand la place le permet : les titres
   du document, le titre de la partie affichée mis en évidence, un clic pour y aller. Sur un écran
   plus étroit, le bouton *Plan* l'ouvre par-dessus le texte.
-- Liens entre documents (`Ctrl+clic`), thème clair ou sombre.
-- Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
+- **Liens entre documents** : le bouton *Lien* propose les documents du dépôt (recherche par nom)
+  ou une adresse web. `Ctrl+clic` ouvre un lien (sur écran tactile : le toucher, puis *Ouvrir*).
+  Le bouton *Précédent* du navigateur revient au document précédent.
+- **Page d'accueil** (bouton maison) : favoris (étoile à côté du nom d'un document), documents
+  ouverts récemment, documents modifiés récemment par l'équipe.
+- **Modèles** à la création d'un document (compte rendu de réunion, note de projet, procédure,
+  liste de tâches) et **Dupliquer** (menu « ⋯ »).
+- **Recherche** (`Ctrl+K`) dans les noms et le contenu, sans tenir compte des accents ni des
+  majuscules (« ete » trouve « Été »), résultats regroupés par document.
+- **Exporter ou imprimer** (menu « ⋯ ») : impression ou PDF du document entier mis en page, page
+  web `.html` (un seul fichier, images comprises, qui s'ouvre aussi dans Word ou LibreOffice), ou
+  le fichier d'origine.
+- Dossiers, création et suppression de documents, adresse partageable par document, thème clair ou sombre.
 - **Renommer ou déplacer** un document ou un dossier : clic sur le titre du document, `F2`, clic droit
   dans la liste ou menu « ⋯ ». Un seul commit ; commentaires, auteurs, droits d'accès et images du
   document suivent, et les participants qui l'ont ouvert basculent sur le nouveau nom. L'historique
   affiché repart du déplacement (les versions antérieures restent dans git sous l'ancien nom).
+  **Les liens qui menaient au document sont mis à jour** dans les autres documents (et ceux du
+  document déplacé recalculés depuis son nouveau dossier), en un seul commit.
 - **Images dans le texte** : colle une capture d'écran (`Ctrl+V`) ou glisse une image sur le document :
   elle est enregistrée dans le dossier « *nom du document* - images » et s'affiche à cet endroit.
   Un autre fichier glissé sur le texte (PDF, tableur…) est importé à côté du document et un lien
@@ -65,7 +90,7 @@ en train d'être tapé.
   Markdown, modifiable à plusieurs) ; le fichier d'origine est conservé.
 - **Comptes et droits d'accès** : chaque personne a son compte. Pour chaque dossier ou fichier,
   l'administrateur choisit qui le voit et qui peut le modifier (*Masqué*, *Lecture seule*,
-  *Lecture et modification*), par personne, par groupe ou pour tout le monde. Les changements
+  *Lecture et commentaires*, *Lecture et modification*), par personne, par groupe ou pour tout le monde. Les changements
   s'appliquent immédiatement, même sur un document déjà ouvert.
 - Dépôt GitHub **connecté depuis l'interface** (Administration → Dépôt) : aucun jeton à l'installation.
   **Déconnecter** efface le jeton du serveur et revient aux fichiers locaux (le dépôt GitHub n'est pas touché).
@@ -104,7 +129,8 @@ modifications*). En dépôt local, l'agent peut modifier directement les fichier
   curl -fsSL https://raw.githubusercontent.com/Anthanaab/Easydoc/main/deploy/easydoc-lxc.sh -o easydoc-lxc.sh
   bash easydoc-lxc.sh
   ```
-- **Docker** : `docker compose up -d` (données dans le volume `easydoc_data`).
+- **Docker** : `docker compose up -d` (données dans le volume `easydoc_data`). Easydoc y tourne sous
+  le compte `node`, jamais en root (un volume créé par une version précédente lui est rendu au démarrage).
 - **Derrière un reverse proxy** (nom de domaine, HTTPS) : le WebSocket doit être relayé, sinon
   l'édition se fait sans temps réel. Exemple nginx :
   ```nginx
@@ -151,7 +177,11 @@ apparaît sur le bouton Administration), affiche la liste des changements et s'i
 récupération du code, bibliothèques si elles ont changé, **essai de la nouvelle version** sur un
 port et des données temporaires, puis redémarrage (≈ 30 s). Les documents ouverts sont enregistrés
 avant le redémarrage, les participants sont reconnectés et la page se recharge toute seule. Si
-l'essai échoue, l'ancienne version est remise en place sans interruption.
+l'essai échoue, l'ancienne version est remise en place (code et bibliothèques, sans rien
+retélécharger). Si la nouvelle version démarre mais plante avec les vraies données, elle est
+remplacée automatiquement par la précédente au troisième démarrage raté, et l'erreur s'affiche dans
+cet onglet. La mise à jour est refusée si le code du serveur contient des modifications locales
+(elle les effacerait).
 
 Disponible pour l'installation Proxmox (clone git lancé par systemd). Le script Proxmox reste
 nécessaire quand une version demande un Node.js plus récent (Easydoc le signale) ; avec Docker,
@@ -210,6 +240,7 @@ systemctl start easydoc
   une règle par dossier ou fichier, avec une ligne par personne, groupe ou « Tout le monde » :
   - *Masqué* : le dossier ou fichier n'apparaît pas du tout (le serveur répond « introuvable ») ;
   - *Lecture seule* : consultation, téléchargement ; toute modification est refusée par le serveur ;
+  - *Lecture et commentaires* : comme *Lecture seule*, avec en plus les commentaires (relecteurs) ;
   - *Lecture et modification*.
 - **Quelle règle s'applique ?** La plus précise : celle du fichier, sinon de son dossier, puis
   des dossiers parents, puis « Tout le dépôt ». Dans une règle, une ligne pour la personne passe
@@ -229,13 +260,19 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 
 ## Sécurité
 
-- Mots de passe hachés avec **scrypt** ; seule l'empreinte des jetons de session est conservée.
-  Fichiers `data/users.json`, `data/sessions.json`, `data/access.json` en droits 600.
+- Mots de passe hachés avec **scrypt** (paramètres recommandés par l'OWASP ; les anciennes
+  empreintes sont refaites à la connexion suivante) ; seule l'empreinte des jetons de session est
+  conservée. Fichiers `data/users.json`, `data/sessions.json`, `data/access.json` en droits 600.
 - Session par cookie `HttpOnly`, `SameSite=Lax` (et `Secure` derrière HTTPS), valable 30 jours,
-  prolongée à l'usage. Requêtes et WebSocket venant d'un autre site refusés.
-- Connexion bloquée 15 min après 8 échecs depuis une même adresse.
+  prolongée à l'usage, 90 jours au plus. Requêtes et WebSocket venant d'un autre site refusés.
+- Connexion bloquée 15 min après 8 échecs sur un même identifiant (ou 30 depuis une même adresse),
+  essais simultanés compris ; même limite pour le mot de passe actuel lors d'un changement.
 - Les droits sont vérifiés côté serveur sur chaque requête et chaque message temps réel ; le nom
-  inscrit dans les commits est celui du compte connecté (impossible à usurper).
+  inscrit dans les commits est celui du compte connecté (impossible à usurper). Un navigateur ne
+  peut modifier que le texte d'un document (jamais les informations tenues par le serveur), et le
+  nom affiché dans la présence est toujours celui de son compte.
+- Les conversions Word et PDF tournent à part, avec une mémoire et une durée limitées : un fichier
+  piégé fait échouer sa conversion, pas le serveur. Les fusions de texte sont limitées dans le temps.
 - Les chemins de fichiers sont validés (impossible de lire ou d'écrire en dehors du dépôt, ni
   les fichiers cachés comme `.git` ou `.env`). Un lien symbolique placé dans le dépôt local ne
   mène pas ailleurs sur le serveur. Sur un disque qui ne distingue pas les majuscules (Windows,
@@ -273,6 +310,10 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `src/tunnel.js` — tunnel Cloudflare (téléchargement vérifié de cloudflared, supervision, journaux)
 - `src/updater.js` — mise à jour depuis l'interface (essai de la nouvelle version, retour arrière)
 - `src/backup.js` — sauvegardes des données (archive tar.gz, sauvegardes automatiques)
+- `src/wsguard.js` — contrôle des messages temps réel (texte seulement, présence non usurpable)
+- `src/links.js` — mise à jour des liens après un déplacement · `src/notify.js` — notifications,
+  dernières modifications
+- `client/markdown-html.js` — Markdown → HTML (impression, export, tableaux, anciennes versions)
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/editor.js` — l'éditeur (CodeMirror 6 relié au texte partagé par y-codemirror.next) :
   rendu mis en forme, barre et raccourcis de mise en forme, surlignages des auteurs et commentaires
@@ -286,7 +327,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 npm test
 ```
 
-Une vingtaine de tests (environ 15 s, `git` requis), sans toucher aux données réelles : chaque
+Une soixantaine de tests (environ une minute, `git` requis), sans toucher aux données réelles : chaque
 fichier démarre son propre serveur Easydoc dans un dossier temporaire, sur un port libre, avec un
 compte administrateur et un compte membre.
 
@@ -295,6 +336,10 @@ compte administrateur et un compte membre.
   liens symboliques, origine des requêtes, déconnexion, CSP
 - `test/pertes.test.js` — modification externe pendant la frappe, échec d'enregistrement (secours),
   enregistrement hors ligne et conflit, restauration
+- `test/fonctions.test.js` — recherche, liens après déplacement, relecteurs, mentions et
+  notifications, page d'accueil, modèles, anciennes versions
+- `test/fusions.test.js`, `test/deplacement.test.js`, `test/sauvegarde.test.js` — fusions,
+  renommage / déplacement, sauvegarde et restauration
 - `test/helpers.js` — serveur de test, sessions, connexions temps réel, commits « externes »
 
 À lancer avant chaque version ; un nouveau bug corrigé mérite son test. Sur GitHub, ils tournent

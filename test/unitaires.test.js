@@ -54,6 +54,90 @@ test("comparaison de textes : limitée dans le temps sur deux très longs textes
   assert.equal(out, b);
 });
 
+test("fusion à trois voies : limitée dans le temps (deux textes très différents = conflit)", () => {
+  const base = Array.from({ length: 30000 }, (_, i) => "ligne a " + i).join("\n");
+  const mine = Array.from({ length: 30000 }, (_, i) => "autre b " + i * 7).join("\n");
+  const t0 = Date.now();
+  assert.equal(merge3(base, mine, base + "\nfin"), null);
+  assert.ok(Date.now() - t0 < 6000, `ne doit pas bloquer le serveur (${Date.now() - t0} ms)`);
+});
+
+test("conversion : un fichier illisible échoue proprement (dans un fil séparé)", async () => {
+  const convert = require("../src/convert");
+  await assert.rejects(convert.pdfToMarkdown(Buffer.from("ceci n'est pas un PDF"), "x"), /illisible|endommagé/);
+  await assert.rejects(convert.docxToMarkdown(Buffer.from("ceci n'est pas un Word"), "x - images"), /./);
+});
+
+test("temps réel : seules les modifications du texte sont acceptées", () => {
+  const { textOnly } = require("../src/wsguard");
+  const Y = require("yjs");
+  const server = new Y.Doc();
+  server.transact(() => { server.getText("content").insert(0, "Bonjour"); server.getMap("meta").set("loaded", true); });
+  const client = new Y.Doc();
+  Y.applyUpdate(client, Y.encodeStateAsUpdate(server));
+  const diff = (fn) => { const sv = Y.encodeStateVector(client); fn(); return Y.encodeStateAsUpdate(client, sv); };
+  // frappe ordinaire, suppression, frappe en plusieurs morceaux dépendants
+  const typed = diff(() => { const t = client.getText("content"); t.insert(7, " à"); t.insert(9, " tous"); t.delete(0, 1); });
+  assert.equal(textOnly(server, typed, "content"), true);
+  Y.applyUpdate(server, typed);
+  // valeur remplacée, valeur effacée, nouvelle clé, nouveau type
+  assert.equal(textOnly(server, diff(() => client.getMap("meta").set("loaded", false)), "content"), false);
+  const c2 = new Y.Doc(); Y.applyUpdate(c2, Y.encodeStateAsUpdate(server));
+  const sv2 = Y.encodeStateVector(c2); c2.getMap("meta").delete("loaded");
+  assert.equal(textOnly(server, Y.encodeStateAsUpdate(c2, sv2), "content"), false);
+  const c3 = new Y.Doc(); Y.applyUpdate(c3, Y.encodeStateAsUpdate(server));
+  const sv3 = Y.encodeStateVector(c3); c3.getMap("autre").set("x", 1);
+  assert.equal(textOnly(server, Y.encodeStateAsUpdate(c3, sv3), "content"), false);
+  const c4 = new Y.Doc(); Y.applyUpdate(c4, Y.encodeStateAsUpdate(server));
+  const sv4 = Y.encodeStateVector(c4); c4.getText("content").insertEmbed(0, { image: "x" });
+  assert.equal(textOnly(server, Y.encodeStateAsUpdate(c4, sv4), "content"), false);
+});
+
+test("mise à jour : une version qui ne démarre pas est remplacée par la précédente", () => {
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { execFileSync } = require("child_process");
+  const { bootGuard, RESTART_CODE } = require("../src/updater");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easydoc-test-maj-"));
+  const app = path.join(dir, "app"), data = path.join(dir, "data");
+  fs.mkdirSync(app); fs.mkdirSync(data);
+  const git = (...a) => execFileSync("git", ["-C", app, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false", ...a]).toString().trim();
+  git("init", "-q");
+  fs.writeFileSync(path.join(app, "version.txt"), "ancienne"); git("add", "."); git("commit", "-qm", "v1");
+  const prevSha = git("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(app, "version.txt"), "nouvelle"); git("commit", "-qam", "v2");
+  fs.mkdirSync(path.join(app, "node_modules.prev")); fs.writeFileSync(path.join(app, "node_modules.prev", "ancienne-lib"), "x");
+  fs.mkdirSync(path.join(app, "node_modules")); fs.writeFileSync(path.join(app, "node_modules", "nouvelle-lib"), "x");
+  const marker = path.join(data, "update-state.json");
+  fs.writeFileSync(marker, JSON.stringify({ pending: true, prevSha, fromVersion: "1", toVersion: "2" }));
+  const exit = process.exit;
+  const codes = [];
+  process.exit = (c) => { codes.push(c); };
+  try {
+    bootGuard({ appDir: app, dataDir: data });
+    bootGuard({ appDir: app, dataDir: data });
+    assert.equal(fs.readFileSync(path.join(app, "version.txt"), "utf8"), "nouvelle", "deux essais avant d'abandonner");
+    bootGuard({ appDir: app, dataDir: data });
+  } finally { process.exit = exit; }
+  assert.deepEqual(codes, [RESTART_CODE]);
+  assert.equal(fs.readFileSync(path.join(app, "version.txt"), "utf8"), "ancienne");
+  assert.ok(fs.existsSync(path.join(app, "node_modules", "ancienne-lib")), "anciennes bibliothèques remises");
+  const m = JSON.parse(fs.readFileSync(marker, "utf8"));
+  assert.equal(m.pending, false); assert.equal(m.rolledBack, true); assert.match(m.error, /retour automatique/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("tunnel : l'arrêt n'attend pas un cloudflared qui n'a jamais pu démarrer", async () => {
+  const { TunnelManager } = require("../src/tunnel");
+  const os = require("os");
+  const tm = new TunnelManager({ dataDir: require("fs").mkdtempSync(require("path").join(os.tmpdir(), "easydoc-test-tunnel-")), port: 1 });
+  const child = require("child_process").spawn("easydoc-programme-inexistant", []);
+  child.on("error", () => {});
+  tm.child = child;
+  const t0 = Date.now();
+  await tm.stop();
+  assert.ok(Date.now() - t0 < 2000);
+});
+
 test("feuille de style : pas de sélecteur orphelin ni d'accolade manquante", () => {
   // un sélecteur laissé seul sur sa ligne avale la règle suivante (bug de la 0.12.0 : .area n'était plus en flex)
   const lines = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "style.css"), "utf8").split("\n");

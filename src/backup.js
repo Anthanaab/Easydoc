@@ -8,7 +8,7 @@ const zlib = require("zlib");
 
 // Ce qui est sauvegardé, relatif au dossier de données. Le reste (programme cloudflared, caches,
 // sauvegardes précédentes, essais de mise à jour) se retélécharge ou se recrée tout seul.
-const ENTRIES = ["config.json", "users.json", "sessions.json", "access.json", "comments.json", "tunnel.json", "authorship", "recovery"];
+const ENTRIES = ["config.json", "users.json", "sessions.json", "access.json", "comments.json", "activity.json", "notifications.json", "tunnel.json", "authorship", "recovery"];
 const MANIFEST = "easydoc-sauvegarde.json";
 
 /* ---- Écriture d'une archive tar (format ustar + en-têtes PAX pour les noms longs ou accentués) ---- */
@@ -88,6 +88,14 @@ async function createBackup({ dataDir, localRepoDir, dest, meta = {} }) {
   gz.end();
   await done;
   fs.renameSync(tmp, dest);
+  // lancé en root (ligne de commande dans le conteneur) : l'archive et son dossier sont rendus au
+  // propriétaire du dossier de données, sinon le service ne peut plus ni les lister ni en créer
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    try {
+      const owner = fs.statSync(dataDir);
+      for (const p of [path.dirname(dest), dest]) if (p.startsWith(path.resolve(dataDir))) fs.chownSync(p, owner.uid, owner.gid);
+    } catch (_e) {}
+  }
   return { files: items.length, bytes: fs.statSync(dest).size };
 }
 

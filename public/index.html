@@ -34,11 +34,12 @@
       <div class="side-tools">
         <label class="search">
           <span data-icon="search"></span>
-          <input id="search" type="search" placeholder="Rechercher partout (Ctrl K)" autocomplete="off" />
-          <kbd>Ctrl K</kbd>
+          <input id="search" type="search" placeholder="Rechercher partout (Ctrl K)" aria-label="Rechercher un document ou dans le contenu" autocomplete="off" />
+          <kbd aria-hidden="true">Ctrl K</kbd>
         </label>
         <div class="search-results" id="searchResults" hidden></div>
         <div class="tool-row">
+          <button class="btn btn-icon" id="btnHome" title="Accueil : favoris, documents récents"><span data-icon="home"></span></button>
           <button class="btn btn-primary" id="btnNew"><span data-icon="plus"></span>Nouveau document</button>
           <button class="btn btn-icon" id="btnUpload" title="Importer des fichiers (PDF, Word, images…)"><span data-icon="upload"></span></button>
         </div>
@@ -52,6 +53,7 @@
           <span class="avatar" id="meAvatar"></span><span class="me-name" id="meName"></span>
         </button>
         <div class="side-foot-actions">
+          <button class="icon-btn" id="btnNotif" title="Notifications : mentions et réponses"><span data-icon="bell"></span><span class="c-badge" id="notifBadge" hidden></span></button>
           <button class="icon-btn" id="btnTheme" title="Thème clair / sombre"><span data-icon="moon"></span></button>
           <button class="icon-btn admin-only" id="btnSettings" title="Administration : utilisateurs, droits d'accès, dépôt" hidden><span data-icon="settings"></span></button>
         </div>
@@ -63,6 +65,7 @@
       <header class="topbar">
         <button class="icon-btn only-mobile" id="btnMenu" title="Documents"><span data-icon="menu"></span></button>
         <div class="crumbs" id="crumbs"></div>
+        <button class="icon-btn fav-btn" id="btnFav" title="Ajouter aux favoris" aria-pressed="false" hidden><span data-icon="star"></span></button>
         <div class="status" id="status"></div>
         <div class="spacer"></div>
         <div class="presence" id="presence"></div>
@@ -71,7 +74,9 @@
         <button class="icon-btn" id="btnComments" title="Tous les commentaires" hidden><span data-icon="comment"></span><span class="c-badge" id="ccBadge" hidden></span></button>
         <button class="icon-btn tb-more-item" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
         <button class="icon-btn tb-more-item" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
+        <button class="icon-btn tb-more-item" id="btnExport" title="Exporter, imprimer ou télécharger" hidden><span data-icon="download"></span></button>
         <button class="icon-btn tb-more-item" id="btnMove" title="Renommer ou déplacer (F2)" hidden><span data-icon="move"></span></button>
+        <button class="icon-btn tb-more-item" id="btnDuplicate" title="Dupliquer ce document" hidden><span data-icon="copy"></span></button>
         <button class="icon-btn tb-more-item" id="btnAccess" title="Qui peut voir ou modifier ce fichier" hidden><span data-icon="lock"></span></button>
         <button class="icon-btn tb-more-item" id="btnSync" title="Récupérer les modifications du dépôt"><span data-icon="refresh"></span></button>
         <button class="icon-btn tb-more-item" id="btnDelete" title="Supprimer ce document"><span data-icon="trash"></span></button>
@@ -95,19 +100,20 @@
         </nav>
         <div class="pane pane-editor" id="paneEditor">
           <div class="fmt-bar" id="fmtBar" role="toolbar" aria-label="Mise en forme" hidden>
-            <button data-fmt="bold" title="Gras (Ctrl+B)"><b>G</b></button>
-            <button data-fmt="italic" title="Italique (Ctrl+I)"><i>I</i></button>
-            <button data-fmt="strike" title="Barré (Ctrl+Maj+X)"><s>S</s></button>
+            <button data-fmt="bold" title="Gras (Ctrl+B)" aria-label="Gras"><b aria-hidden="true">G</b></button>
+            <button data-fmt="italic" title="Italique (Ctrl+I)" aria-label="Italique"><i aria-hidden="true">I</i></button>
+            <button data-fmt="strike" title="Barré (Ctrl+Maj+X)" aria-label="Barré"><s aria-hidden="true">S</s></button>
             <span class="sep"></span>
-            <button data-fmt="h1" title="Titre 1 (Ctrl+Alt+1)">T1</button>
-            <button data-fmt="h2" title="Titre 2 (Ctrl+Alt+2)">T2</button>
-            <button data-fmt="h3" title="Titre 3 (Ctrl+Alt+3)">T3</button>
+            <button data-fmt="h1" title="Titre 1 (Ctrl+Maj+1)" aria-label="Titre 1">T1</button>
+            <button data-fmt="h2" title="Titre 2 (Ctrl+Maj+2)" aria-label="Titre 2">T2</button>
+            <button data-fmt="h3" title="Titre 3 (Ctrl+Maj+3)" aria-label="Titre 3">T3</button>
             <span class="sep"></span>
-            <button data-fmt="ul" title="Liste à puces (Ctrl+Maj+8)"><span data-icon="listUl"></span></button>
-            <button data-fmt="ol" title="Liste numérotée (Ctrl+Maj+7)"><span data-icon="listOl"></span></button>
-            <button data-fmt="task" title="Liste de cases à cocher (Ctrl+Maj+9)"><span data-icon="task"></span></button>
+            <button data-fmt="ul" title="Liste à puces (Ctrl+Maj+8)" aria-label="Liste à puces"><span data-icon="listUl"></span></button>
+            <button data-fmt="ol" title="Liste numérotée (Ctrl+Maj+7)" aria-label="Liste numérotée"><span data-icon="listOl"></span></button>
+            <button data-fmt="task" title="Liste de cases à cocher (Ctrl+Maj+9)" aria-label="Liste de cases à cocher"><span data-icon="task"></span></button>
             <span class="sep"></span>
-            <button data-fmt="link" title="Lien"><span data-icon="link"></span></button>
+            <button data-fmt="table" title="Insérer un tableau" aria-label="Insérer un tableau"><span data-icon="table"></span></button>
+            <button data-fmt="link" title="Lien vers un document ou une adresse web" aria-label="Lien"><span data-icon="link"></span></button>
             <button data-fmt="quote" title="Citation"><span data-icon="quote"></span></button>
             <button data-fmt="code" title="Code (Ctrl+E)"><span data-icon="code"></span></button>
           </div>
@@ -139,6 +145,7 @@
     <div class="modal-card" id="modalCard"></div>
   </div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="print-view" id="printView"></div>
 
   <script type="module" src="app.js"></script>
 </body>

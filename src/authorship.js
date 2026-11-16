@@ -67,13 +67,16 @@ function merge3(base, mine, theirs) {
   // fins de ligne Windows (CRLF) : la fusion se fait en LF, puis le fichier garde ses fins de ligne
   const crlf = /\r\n/.test(theirs);
   const lf = (t) => t.replace(/\r\n/g, "\n");
-  let out = Diff.applyPatch(lf(theirs), Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 1 }));
+  // délai maximal : deux textes très différents ne doivent pas bloquer le serveur (traité comme un conflit)
+  const p1 = Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 1, timeout: 1500 });
+  if (!p1) return null;
+  let out = Diff.applyPatch(lf(theirs), p1);
   if (out === false) {
     // lignes voisines modifiées des deux côtés : nouvel essai sans contexte, seulement si chaque
     // modification remplace une ligne (repérée par son contenu) ; une simple insertion sans repère
     // pourrait tomber au mauvais endroit
-    const p0 = Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 0 });
-    if (p0.hunks.every((h) => h.lines.some((l) => l[0] === "-"))) out = Diff.applyPatch(lf(theirs), p0);
+    const p0 = Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 0, timeout: 1500 });
+    if (p0 && p0.hunks.every((h) => h.lines.some((l) => l[0] === "-"))) out = Diff.applyPatch(lf(theirs), p0);
   }
   if (out === false) return null;
   return crlf ? out.replace(/\n/g, "\r\n") : out;

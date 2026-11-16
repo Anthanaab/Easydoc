@@ -1,0 +1,2 @@
+# Scripts shell : toujours en fins de ligne LF (sinon « /bin/sh^M » dans Docker ou sur Proxmox)
+*.sh text eol=lf

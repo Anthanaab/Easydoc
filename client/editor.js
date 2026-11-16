@@ -9,7 +9,7 @@
 //   marks(from, to)   → passages à surligner : [{ from, to, cls, attrs }] (auteurs, commentaires)
 //   onUpdate(update, local) → après chaque changement (texte, sélection, focus)
 //   resolveImage(src) → adresse d'une image du dépôt ;  openLink(href) → ouverture d'un lien
-import { EditorState, EditorSelection, StateEffect, Compartment, Prec } from "@codemirror/state";
+import { EditorState, EditorSelection, StateEffect, StateField, Compartment, Prec } from "@codemirror/state";
 import { EditorView, ViewPlugin, Decoration, WidgetType, keymap, placeholder as cmPlaceholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageSupport } from "@codemirror/language";
@@ -18,6 +18,8 @@ import { tags } from "@lezer/highlight";
 import { yCollab, yUndoManagerKeymap, ySyncAnnotation } from "y-codemirror.next";
 import { diffChars } from "diff";
 import { search, searchKeymap, openSearchPanel, highlightSelectionMatches } from "@codemirror/search";
+import DOMPurify from "dompurify";
+import { markdownToHtml } from "./markdown-html.js";
 
 /* Recherche dans le document (Ctrl+F) : l'éditeur n'affiche que les lignes visibles, la recherche du
    navigateur ne verrait pas le reste d'un long document. Panneau en français. */
@@ -28,6 +30,75 @@ const PHRASES_FR = EditorState.phrases.of({
   "current match": "résultat actuel", "on line": "à la ligne", "Go to line": "Aller à la ligne", "go": "aller",
   "replaced $ matches": "$ remplacements", "replaced match on line $": "remplacement à la ligne $",
 });
+
+/* ---- Tableaux : affichés en vrai tableau, sauf quand le curseur est dedans (texte modifiable) ---- */
+// Un remplacement de plusieurs lignes doit venir d'un StateField (pas d'un ViewPlugin).
+const tableHtmlCache = new Map();
+function tableHtml(src, hooks) {
+  let h = tableHtmlCache.get(src);
+  if (h === undefined) {
+    h = DOMPurify.sanitize(markdownToHtml(src, { url: (u, kind) => (kind === "image" && hooks.resolveImage ? hooks.resolveImage(u) : u) }));
+    if (tableHtmlCache.size > 200) tableHtmlCache.clear();
+    tableHtmlCache.set(src, h);
+  }
+  return h;
+}
+class TableWidget extends WidgetType {
+  constructor(html, from) { super(); this.html = html; this.from = from; }
+  eq(o) { return o.html === this.html && o.from === this.from; }
+  toDOM(view) {
+    const d = document.createElement("div");
+    d.className = "cm-table-widget";
+    d.title = "Cliquer pour modifier le tableau";
+    d.innerHTML = this.html;
+    // un clic place le curseur dans le tableau : son texte réapparaît, modifiable
+    d.addEventListener("mousedown", (e) => {
+      if (e.target.closest("a")) return;
+      e.preventDefault();
+      const line = view.state.doc.lineAt(this.from);
+      view.dispatch({ selection: { anchor: Math.min(line.to, this.from + 2) }, scrollIntoView: true });
+      view.focus();
+    });
+    return d;
+  }
+  ignoreEvent() { return true; }
+}
+function tableDecorations(state, hooks) {
+  const sel = state.selection.ranges;
+  const out = [];
+  syntaxTree(state).iterate({
+    enter(n) {
+      if (n.name !== "Table") return n.name === "Document" ? undefined : false;
+      const from = state.doc.lineAt(n.from).from, to = state.doc.lineAt(n.to).to;
+      if (sel.some((r) => r.to >= from && r.from <= to)) return false; // en cours de modification
+      out.push(Decoration.replace({ widget: new TableWidget(tableHtml(state.sliceDoc(n.from, n.to), hooks), from), block: true }).range(from, to));
+      return false;
+    },
+  });
+  return Decoration.set(out, true);
+}
+function tables(hooks) {
+  return StateField.define({
+    create: (state) => tableDecorations(state, hooks),
+    update(deco, tr) {
+      if (tr.docChanged || tr.selection || syntaxTree(tr.startState) !== syntaxTree(tr.state)) return tableDecorations(tr.state, hooks);
+      return deco;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+}
+function insertTable(view) {
+  const { state } = view;
+  if (state.readOnly) return false;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const tpl = "| Colonne 1 | Colonne 2 | Colonne 3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |";
+  const before = line.text.trim() ? "\n\n" : line.from > 0 && state.doc.lineAt(line.from - 1).text.trim() ? "\n" : "";
+  const at = line.text.trim() ? line.to : line.from;
+  const insert = before + tpl + "\n";
+  view.dispatch({ changes: { from: at, to: line.text.trim() ? at : line.to, insert }, selection: EditorSelection.range(at + before.length + 2, at + before.length + 11), scrollIntoView: true, userEvent: "input.format" });
+  view.focus();
+  return true;
+}
 
 /** Redessine les surlignages fournis par l'application (auteurs, commentaires). */
 const refreshEffect = StateEffect.define();
@@ -158,7 +229,7 @@ function livePreview(hooks) {
               const href = url ? doc.sliceString(url.from, url.to) : "";
               if (marks.length >= 2) {
                 const textFrom = marks[0].to, textTo = marks[1].from;
-                if (textTo > textFrom) out.push(mark("cm-link", { "data-href": href }).range(textFrom, textTo));
+                if (textTo > textFrom) out.push(mark("cm-link", { "data-href": href, title: LINK_TITLE }).range(textFrom, textTo));
                 if (!act) { hideRange(n.from, textFrom); hideRange(textTo, n.to); }
                 else out.push(mark("cm-md-mark").range(textTo, n.to));
               }
@@ -167,7 +238,7 @@ function livePreview(hooks) {
             case "Autolink": case "URL": {
               if (name === "URL" && n.node.parent && /Link|Image/.test(n.node.parent.name)) return false;
               const t = doc.sliceString(n.from, n.to).replace(/^<|>$/g, "");
-              out.push(mark("cm-link", { "data-href": t }).range(n.from, n.to));
+              out.push(mark("cm-link", { "data-href": t, title: LINK_TITLE }).range(n.from, n.to));
               return false;
             }
             case "Image": {
@@ -338,8 +409,14 @@ export const FORMATS = {
   bold: (v) => toggleWrap(v, "**"), italic: (v) => toggleWrap(v, "*"), strike: (v) => toggleWrap(v, "~~"), code: codeFormat,
   h1: (v) => setBlock(v, "h1"), h2: (v) => setBlock(v, "h2"), h3: (v) => setBlock(v, "h3"),
   ul: (v) => setBlock(v, "ul"), ol: (v) => setBlock(v, "ol"), task: (v) => setBlock(v, "task"), quote: (v) => setBlock(v, "quote"),
-  link: insertLink,
+  link: insertLink, table: insertTable,
 };
+// Raccourcis à chiffres reconnus par la touche physique (event.code) : avec un clavier AZERTY,
+// Ctrl+Maj+1 donne « 1 » et Ctrl+Alt+é sert à taper « ~ » (AltGr) ; la correspondance par caractère
+// de CodeMirror ne les reconnaît pas. Ctrl+Maj+1/2/3 (titres) et 7/8/9 (listes) marchent partout.
+const DIGIT_FORMATS = { Digit1: "h1", Digit2: "h2", Digit3: "h3", Digit7: "ol", Digit8: "ul", Digit9: "task" };
+const LINK_TITLE = "Ctrl+clic pour ouvrir le lien";
+const coarsePointer = () => typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
 const formatKeymap = [
   { key: "Mod-b", run: FORMATS.bold }, { key: "Mod-i", run: FORMATS.italic },
   { key: "Mod-Shift-x", run: FORMATS.strike }, { key: "Mod-e", run: FORMATS.code },
@@ -368,7 +445,7 @@ export function createEditor(parent, hooks) {
       keymap.of([...(collab ? yUndoManagerKeymap : historyKeymap), ...searchKeymap, indentWithTab, ...defaultKeymap]),
       search({ top: true }), PHRASES_FR, highlightSelectionMatches(),
       collab ? yCollab(ytext, awareness, { undoManager }) : history(),
-      md ? [new LanguageSupport(markdownLanguage), livePreview(hooks), syntaxHighlighting(mdHighlight)] : [],
+      md ? [new LanguageSupport(markdownLanguage), livePreview(hooks), tables(hooks), syntaxHighlighting(mdHighlight)] : [],
       appMarks(hooks),
       EditorView.editorAttributes.of({ class: md ? "cm-md" : "cm-plain" }),
       EditorView.contentAttributes.of({ spellcheck: "true", autocorrect: "on", autocapitalize: "sentences", "aria-label": "Contenu du document" }),
@@ -403,7 +480,17 @@ export function createEditor(parent, hooks) {
             hooks.openLink(a.dataset.href || a.textContent);
             return true;
           }
+          // écran tactile (pas de Ctrl) : le curseur se place, et un bouton propose d'ouvrir le lien
+          if (a && coarsePointer() && hooks.linkTapped) hooks.linkTapped(a.dataset.href || a.textContent);
           return false;
+        },
+        keydown(e, view) {
+          if (!md || view.state.readOnly || !(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return false;
+          const k = DIGIT_FORMATS[e.code];
+          if (!k) return false;
+          e.preventDefault();
+          FORMATS[k](view);
+          return true;
         },
       }),
     ];
@@ -494,6 +581,13 @@ export function createEditor(parent, hooks) {
     /** Position du début de la ligne n (numérotée à partir de 1). */
     lineStart(n) { const d = view.state.doc; return d.line(Math.max(1, Math.min(n || 1, d.lines))).from; },
     format(name) { const f = FORMATS[name]; return f ? f(view) : false; },
+    /** Remplace un passage (lien inséré depuis la fenêtre « Lien »…) et sélectionne [selFrom, selTo] dans le nouveau texte. */
+    replaceRange(from, to, text, selFrom = text.length, selTo = selFrom) {
+      if (view.state.readOnly) return false;
+      view.dispatch({ changes: { from, to, insert: text }, selection: EditorSelection.range(from + selFrom, from + selTo), scrollIntoView: true, userEvent: "input.format" });
+      view.focus();
+      return true;
+    },
     get mode() { return mode; },
   };
 }

@@ -20,6 +20,8 @@ const { WebSocketServer } = require("ws");
 const Y = require("yjs");
 const { Octokit } = require("@octokit/rest");
 const yws = require("y-websocket/bin/utils");
+const wsguard = require("./src/wsguard");
+const links = require("./src/links");
 const { RepoService } = require("./src/repo");
 const { SettingsStore } = require("./src/settings");
 const paths = require("./src/paths");
@@ -29,7 +31,7 @@ const auth = require("./src/auth");
 const authorship = require("./src/authorship");
 const { CommentStore, locate: locateQuote, context: quoteContext } = require("./src/comments");
 const { TunnelManager } = require("./src/tunnel");
-const { Updater } = require("./src/updater");
+const { Updater, bootGuard } = require("./src/updater");
 const { BackupManager } = require("./src/backup");
 const pkg = require("./package.json");
 
@@ -41,6 +43,8 @@ const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 25);
 const PUBLIC = path.join(__dirname, "public");
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const LOCAL_DIR = process.env.LOCAL_REPO_DIR || path.join(DATA_DIR, "localrepo");
+// nouvelle version installée par une mise à jour qui ne démarre pas : retour à la précédente
+bootGuard({ appDir: __dirname, dataDir: DATA_DIR });
 const AUTOSAVE_MS = Number(process.env.AUTOSAVE_MS || 5000);   // délai après la dernière frappe
 const AUTOSAVE_MAX_MS = 60000;                                  // au plus tard, même si on tape sans arrêt
 const POLL_MS = Number(process.env.POLL_MS || 20000);           // détection des modifications externes
@@ -129,6 +133,9 @@ function sameOrigin(req) {
 const authorStore = new authorship.AuthorshipStore(path.join(DATA_DIR, "authorship"));
 // ---- Commentaires (façon Google Docs, par document) --------------------------------------------
 const comments = new CommentStore(path.join(DATA_DIR, "comments.json"));
+const { ActivityLog, NotificationStore, mentionsIn } = require("./src/notify");
+const activity = new ActivityLog(path.join(DATA_DIR, "activity.json"));
+const notifications = new NotificationStore(path.join(DATA_DIR, "notifications.json"));
 /** Prévient les navigateurs qui ont le document ouvert : ils rechargent ses commentaires. */
 function notifyComments(name) {
   const doc = yws.docs.get(name);
@@ -371,6 +378,7 @@ function commitDoc(name, extraAuthor, docArg) {
         }
       }
       authorStore.save(repoKey(), name, content, authorship.runsFromYText(ytext), s.attrV || ATTR_V);
+      if (r && r.committed) activity.add(name, authors.join(", "));
       s.lastCommitted = content;
       s.lastRemote = content;
       s.baseUpdate = snapshot;
@@ -518,7 +526,9 @@ yws.setPersistence({
       const ranges = [];
       let i = 0;
       for (const op of ev.delta) {
-        if (op.retain) i += op.retain;
+        // mise en forme modifiée par un navigateur (l'attribution d'un passage) : reprise au nom
+        // de la connexion, personne ne peut attribuer son texte à quelqu'un d'autre
+        if (op.retain) { if (op.attributes) ranges.push([i, op.retain]); i += op.retain; }
         else if (typeof op.insert === "string") { ranges.push([i, op.insert.length]); i += op.insert.length; }
       }
       if (!ranges.length) return;
@@ -678,8 +688,6 @@ app.use((req, res, next) => {
   else { res.set("X-Frame-Options", "DENY"); res.set("Content-Security-Policy", APP_CSP); }
   next();
 });
-app.disable("x-powered-by");
-app.use(express.json({ limit: "5mb" }));
 app.use(express.static(PUBLIC, { maxAge: 0, etag: true }));
 
 const bad = (res, code, error) => {
@@ -703,6 +711,9 @@ app.use("/api", (req, res, next) => {
   if (!req.user) return bad(res, 401, "Session expirée : reconnecte-toi.");
   next();
 });
+// corps JSON lu après la vérification de session : sans session, seuls de petits corps sont acceptés
+const jsonBig = express.json({ limit: "5mb" }), jsonSmall = express.json({ limit: "32kb" });
+app.use("/api", (req, res, next) => (req.user ? jsonBig : jsonSmall)(req, res, next));
 const adminOnly = (req, res, next) => (req.user && req.user.role === "admin" ? next() : bad(res, 403, "Réservé aux administrateurs."));
 /** Vérifie un droit ; un fichier masqué répond « introuvable » (on ne révèle pas son existence). */
 function allow(req, res, p, need) {
@@ -715,14 +726,34 @@ function allow(req, res, p, need) {
 const errStatus = (e, fallback = 400) => (e && e.status) || fallback;
 
 // ---- Comptes ------------------------------------------------------------------------------------
-const loginFails = new Map(); // ip → { n, until }
+// Essais de mot de passe limités par adresse IP ET par identifiant (derrière un proxy mal réglé,
+// tout le monde partage la même adresse : la limite par identifiant protège quand même chaque
+// compte). L'essai est compté AVANT la vérification : 500 essais envoyés d'un coup ne passent pas.
+const loginFails = new Map(); // clé → { n, until }
+const FAIL_WINDOW = 15 * 60 * 1000;
+const FAIL_LIMIT = { ip: 30, user: 8, pw: 8 };
 const clientIp = (req) => req.ip || req.socket.remoteAddress || "?";
-function tooManyFails(ip) { const a = loginFails.get(ip); return !!(a && a.until > Date.now() && a.n >= 8); }
-function noteFail(ip) {
-  let a = loginFails.get(ip);
-  if (!a || a.until < Date.now()) a = { n: 0, until: Date.now() + 15 * 60 * 1000 };
-  a.n++;
-  loginFails.set(ip, a);
+function failCount(key) { const a = loginFails.get(key); return a && a.until > Date.now() ? a.n : 0; }
+function noteFail(key, n = 1) {
+  let a = loginFails.get(key);
+  if (!a || a.until < Date.now()) a = { n: 0, until: Date.now() + FAIL_WINDOW };
+  a.n = Math.max(0, a.n + n);
+  if (a.n) loginFails.set(key, a); else loginFails.delete(key);
+}
+/** Réserve un essai sur chaque clé ; renvoie la fonction qui l'annule (mot de passe correct), ou null si la limite est atteinte. */
+function reserveAttempt(keys) {
+  if (keys.some(([k, kind]) => failCount(k) >= FAIL_LIMIT[kind])) return null;
+  for (const [k] of keys) noteFail(k);
+  return () => { for (const [k] of keys) noteFail(k, -1); };
+}
+setInterval(() => { const now = Date.now(); for (const [k, a] of loginFails) if (a.until < now) loginFails.delete(k); }, FAIL_WINDOW).unref();
+// scrypt occupe les fils de travail de Node (aussi utilisés pour lire les fichiers) : vérifications
+// simultanées limitées, les suivantes sont refusées tout de suite
+let verifying = 0;
+async function checkPassword(password, hash) {
+  if (verifying >= 4) { const e = new Error("Serveur occupé : réessaie dans un instant."); e.status = 429; throw e; }
+  verifying++;
+  try { return await auth.verifyPassword(String(password || ""), hash); } finally { verifying--; }
 }
 
 app.get("/api/auth/state", (req, res) => res.json({
@@ -741,13 +772,17 @@ app.post("/api/auth/setup", async (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const ip = clientIp(req);
-  if (tooManyFails(ip)) return bad(res, 429, "Trop de tentatives : réessaie dans quelques minutes.");
+  const name = String(req.body.username || "").trim().toLowerCase().slice(0, 64);
+  const release = reserveAttempt([[`ip:${clientIp(req)}`, "ip"], [`user:${name}`, "user"]]);
+  if (!release) return bad(res, 429, "Trop de tentatives : réessaie dans quelques minutes.");
+  let ok = false;
   const u = users.byUsername(req.body.username);
-  const ok = await auth.verifyPassword(String(req.body.password || ""), u && u.hash);
-  if (!u || !ok) { noteFail(ip); return bad(res, 401, "Identifiant ou mot de passe incorrect."); }
+  try { ok = await checkPassword(req.body.password, u && u.hash); }
+  catch (e) { release(); return bad(res, errStatus(e, 500), e.message); }
+  if (!u || !ok) return bad(res, 401, "Identifiant ou mot de passe incorrect.");
+  release();
   if (u.disabled) return bad(res, 403, "Ce compte est désactivé. Contacte un administrateur.");
-  loginFails.delete(ip);
+  if (auth.needsRehash(u.hash)) users.rehash(u.id, req.body.password).catch((e) => console.error("[auth] empreinte :", e.message));
   setSessionCookie(req, res, sessions.create(u));
   res.json({ ok: true, user: auth.publicUser(u) });
 });
@@ -768,7 +803,13 @@ app.post("/api/auth/profile", async (req, res) => {
 
 app.post("/api/auth/password", async (req, res) => {
   try {
-    if (!(await auth.verifyPassword(String(req.body.current || ""), req.user.hash))) return bad(res, 400, "Mot de passe actuel incorrect.");
+    // une session volée ne doit pas permettre de deviner le mot de passe actuel
+    const release = reserveAttempt([[`pw:${req.user.id}`, "pw"]]);
+    if (!release) return bad(res, 429, "Trop de tentatives : réessaie dans quelques minutes.");
+    let ok;
+    try { ok = await checkPassword(req.body.current, req.user.hash); } catch (e) { release(); throw e; }
+    if (!ok) return bad(res, 400, "Mot de passe actuel incorrect.");
+    release();
     const u = await users.update(req.user.id, { password: req.body.next });
     setSessionCookie(req, res, sessions.create(u)); // les autres sessions de ce compte sont fermées
     enforceAccess();
@@ -805,6 +846,7 @@ app.delete("/api/admin/users/:id", adminOnly, (req, res) => {
     const u = users.remove(req.params.id);
     sessions.destroyUser(u.id);
     access.removeUser(u.username);
+    notifications.removeUser(u.id);
     enforceAccess();
     res.json({ ok: true });
   } catch (e) { bad(res, errStatus(e), e.message); }
@@ -861,7 +903,7 @@ const backups = new BackupManager({
   dataDir: DATA_DIR, localRepoDir: LOCAL_DIR,
   meta: () => ({ version: pkg.version, mode: repo.mode, depot: repo.mode === "github" ? repo.options.githubRepo : "local" }),
   // documents ouverts enregistrés et fichiers en attente écrits : la sauvegarde est cohérente
-  beforeBackup: async () => { await flushAll(); sessions.flush(); comments.flush(); },
+  beforeBackup: async () => { await flushAll(); sessions.flush(); comments.flush(); activity.flush(); notifications.flush(); },
 });
 app.get("/api/admin/backups", adminOnly, (_req, res) => res.json({
   ok: true, ...backups.settings, list: backups.list(), running: !!backups.running, lastError: backups.lastError, dir: backups.dir,
@@ -969,6 +1011,7 @@ app.post("/api/upload", express.raw({ type: () => true, limit: MAX_UPLOAD_MB * 1
     } else {
       await serialize(target, () => repo.writeFile(target, buf, `Easydoc : import de ${target}${author ? ` (${author})` : ""}`));
     }
+    activity.add(target, author, "importé");
     bump("treeVersion");
     res.json({ ok: true, path: target, renamed: target !== wanted });
   } catch (e) { bad(res, 500, e.message); }
@@ -1003,17 +1046,20 @@ app.post("/api/convert", async (req, res) => {
     const targetStem = path.posix.basename(target).replace(/\.md$/i, "");
     let markdown, images = 0;
     if (kind === "docx") {
-      const imgDir = `${targetStem} - images`;
-      const pending = [];
-      const r = await convert.docxToMarkdown(f.buf, async (name, data) => {
-        pending.push({ p: joinPath(dir, imgDir, name), data });
-        return `${encSeg(imgDir)}/${encSeg(name)}`;
-      });
-      for (const im of pending) {
-        await serialize(im.p, () => repo.writeFile(im.p, im.data, `Easydoc : image extraite de ${p}`));
+      // dossier d'images libre (jamais celui d'un autre document) et modifiable par cette personne
+      let imgDir = `${targetStem} - images`;
+      const taken = new Set((await repo.listFiles()).map((x) => x.path.toLowerCase()));
+      const used = (d) => [...taken].some((t) => t.startsWith(joinPath(dir, d).toLowerCase() + "/"));
+      for (let i = 2; used(imgDir) && i < 100; i++) imgDir = `${targetStem} - images (${i})`;
+      const r = await convert.docxToMarkdown(f.buf, imgDir);
+      const files = r.images.map((im) => ({ rel: joinPath(dir, imgDir, im.name), buf: im.data }));
+      if (files.length) {
+        if (used(imgDir)) return bad(res, 409, "Impossible de trouver un dossier libre pour les images de ce document.");
+        if (!access.can(req.user, files[0].rel, "write")) return bad(res, 403, "Tu n'as pas le droit d'ajouter les images de ce document dans ce dossier.");
+        await repo.addFiles(files, `Easydoc : ${files.length} image(s) extraite(s) de ${p}`);
       }
       markdown = r.markdown;
-      images = r.images;
+      images = files.length;
     } else {
       markdown = await convert.pdfToMarkdown(f.buf, stem);
     }
@@ -1078,28 +1124,51 @@ app.get("/api/people", (_req, res) => {
   res.json({ ok: true, people: users.all().map((u) => ({ key: keyOfUser(u), username: u.username, name: u.displayName })) });
 });
 
-// Recherche dans le contenu des documents (respecte les droits : les fichiers masqués sont ignorés).
 // ---- Recherche dans le contenu ------------------------------------------------------------------
-// Le texte des documents est gardé en mémoire avec l'empreinte (sha) de sa version : avec GitHub,
-// seuls les fichiers modifiés depuis la recherche précédente sont relus (quota d'API préservé).
-const searchCache = new Map(); // chemin → { sha, content }
+// Respecte les droits (les fichiers masqués sont ignorés), ignore majuscules ET accents (« ete »
+// trouve « été »). Le texte est gardé en mémoire avec l'empreinte de sa version (sha avec GitHub,
+// taille + date en local) : seuls les fichiers modifiés depuis la recherche précédente sont relus.
+const SEARCH_MAX_FILES = 1000, SEARCH_MAX_BYTES = 2 * 1024 * 1024, SEARCH_PER_FILE = 5, SEARCH_MAX_RESULTS = 80;
+const searchCache = new Map(); // chemin → { sig, content }
+const versionSig = (f) => f.sha || (f.mtime ? `${f.size}:${f.mtime}` : "");
 async function searchText(f) {
   const live = yws.docs.get(f.path);
   if (live && live.getMap("meta").get("loaded")) return live.getText(TEXT).toString();
+  if (f.size > SEARCH_MAX_BYTES) return null; // très gros fichier texte importé : ignoré
+  const sig = versionSig(f);
   const c = searchCache.get(f.path);
-  if (c && f.sha && c.sha === f.sha) return c.content;
+  if (c && sig && c.sig === sig) return c.content;
   const r = await repo.readFile(f.path);
   if (!r) return null;
-  if (f.sha) searchCache.set(f.path, { sha: f.sha, content: r.content });
+  if (sig) searchCache.set(f.path, { sig, content: r.content });
   return r.content;
 }
+/** Texte sans accents ni majuscules, et pour chaque caractère sa position dans le texte d'origine. */
+const MARKS = /[\u0300-\u036f]/g;
+function foldText(text) {
+  if (/^[\x00-\x7f]*$/.test(text)) return { s: text.toLowerCase(), map: null };
+  let s = "";
+  const map = [];
+  for (let i = 0; i < text.length; i++) {
+    let ch = text[i];
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) ch += text[++i]; // emoji, etc. : 2 unités
+    const f = ch.normalize("NFD").replace(MARKS, "").toLowerCase();
+    for (let k = 0; k < f.length; k++) map.push(i - ch.length + 1);
+    s += f;
+  }
+  map.push(text.length);
+  return { s, map };
+}
+const foldQuery = (q) => q.normalize("NFD").replace(MARKS, "").toLowerCase();
 
 app.get("/api/search", async (req, res) => {
   const q = String(req.query.q || "").trim().slice(0, 120);
   if (!q) return res.json({ ok: true, results: [] });
   try {
-    const all = (await repo.listFiles()).filter((f) => isEditable(f.path) && access.can(req.user, f.path, "read")).slice(0, 200);
-    for (const k of searchCache.keys()) if (!all.some((f) => f.path === k)) searchCache.delete(k);
+    const all = (await repo.listFiles()).filter((f) => isEditable(f.path) && access.can(req.user, f.path, "read")).slice(0, SEARCH_MAX_FILES);
+    const keep = new Set(all.map((f) => f.path));
+    for (const k of searchCache.keys()) if (!keep.has(k)) searchCache.delete(k);
     // lecture en parallèle (6 à la fois) des documents pas encore en mémoire
     const texts = new Map();
     let next = 0;
@@ -1109,36 +1178,49 @@ app.get("/api/search", async (req, res) => {
         try { texts.set(f.path, await searchText(f)); } catch (_e) {}
       }
     }));
-    const out = [];
-    const needle = q.toLowerCase();
-    for (const f of all) {
+    const needle = foldQuery(q);
+    const groups = [];
+    let total = 0;
+    // le nom du document compte aussi : un document dont le nom correspond passe en premier
+    const ranked = all.map((f) => ({ f, byName: foldQuery(displayNameOf(f.path)).includes(needle) }))
+      .sort((a, b) => b.byName - a.byName);
+    for (const { f, byName } of ranked) {
       const text = texts.get(f.path);
-      if (!text) continue;
-      const lower = text.toLowerCase();
-      let from = 0;
-      for (let k = 0; k < 25; k++) {
-        const idx = lower.indexOf(needle, from);
+      if (!text && !byName) continue;
+      const { s, map } = foldText(text || "");
+      const orig = (j) => (map ? map[j] : j);
+      const matches = [];
+      let count = 0, from = 0;
+      for (;;) {
+        const idx = needle ? s.indexOf(needle, from) : -1;
         if (idx < 0) break;
-        // extrait la ligne entière autour du match
-        const ls = text.lastIndexOf("\n", idx - 1) + 1;
-        let le = text.indexOf("\n", idx);
-        if (le < 0) le = text.length;
-        const line = text.slice(ls, le);
-        const lineNo = text.slice(0, ls).split("\n").length;
-        const at = idx - ls;              // position du match dans la ligne
-        const start = Math.max(0, at - 25), end = Math.min(line.length, at + q.length + 40);
-        const clean = (str) => str.replace(/\*\*|__|`/g, ""); // enlève les balises markdown du raccourci
-        const s1 = (start > 0 ? "…" : "") + clean(line.slice(start, at));
-        const s2 = clean(line.slice(at, at + q.length));
-        const s3 = clean(line.slice(at + q.length, end));
-        out.push({ path: f.path, line: lineNo, snippet: s1 + s2 + s3 + (end < line.length ? "…" : "") });
+        count++;
+        if (matches.length < SEARCH_PER_FILE) {
+          const a = orig(idx), b = orig(idx + needle.length);
+          const ls = text.lastIndexOf("\n", a - 1) + 1;
+          let le = text.indexOf("\n", a);
+          if (le < 0) le = text.length;
+          const start = Math.max(ls, a - 30), end = Math.min(le, b + 50);
+          const clean = (str) => str.replace(/\*\*|__|`/g, ""); // balises markdown retirées de l'extrait
+          matches.push({
+            line: text.slice(0, ls).split("\n").length,
+            before: (start > ls ? "…" : "") + clean(text.slice(start, a)),
+            match: text.slice(a, Math.min(b, le)),
+            after: clean(text.slice(Math.min(b, le), end)) + (end < le ? "…" : ""),
+          });
+        }
         from = idx + Math.max(needle.length, 1);
+        if (count > 999) break;
       }
-      if (out.length >= 30) break;
+      if (!count && !byName) continue;
+      groups.push({ path: f.path, count, byName, matches });
+      total += Math.max(matches.length, 1);
+      if (total >= SEARCH_MAX_RESULTS) break;
     }
-    res.json({ ok: true, results: out });
+    res.json({ ok: true, results: groups, truncated: total >= SEARCH_MAX_RESULTS });
   } catch (e) { bad(res, 500, "Recherche impossible : " + e.message); }
 });
+const displayNameOf = (p) => path.posix.basename(p).replace(/\.(md|markdown|txt)$/i, "");
 
 app.get("/api/history", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
@@ -1163,6 +1245,20 @@ app.get("/api/history/diff", async (req, res) => {
   try {
     const d = await repo.commitDiff(p, String(req.query.sha || ""));
     res.json({ ok: true, patch: String(d.patch || "").slice(0, 400000), binary: !!d.binary, status: d.status });
+  } catch (e) { bad(res, 400, e.message); }
+});
+
+// Texte complet d'un document à une version donnée (aperçu avant de le restaurer).
+app.get("/api/history/content", async (req, res) => {
+  const p = safeDocPath(String(req.query.path || ""));
+  const sha = String(req.query.sha || "");
+  if (!p) return bad(res, 400, "Chemin invalide.");
+  if (!allow(req, res, p, "read")) return;
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return bad(res, 400, "Version invalide.");
+  try {
+    const content = await repo.readAt(p, sha);
+    if (content === null) return bad(res, 404, "Ce document n'existe pas à cette version.");
+    res.json({ ok: true, content: content.slice(0, 2 * 1024 * 1024) });
   } catch (e) { bad(res, 400, e.message); }
 });
 
@@ -1196,7 +1292,7 @@ app.get("/api/comments", (req, res) => {
 // Nouveau fil, ancré sur un passage du document.
 app.post("/api/comments", async (req, res) => {
   const b = commentBody(req);
-  const p = commentPath(req, res, b.path, "write");
+  const p = commentPath(req, res, b.path, "comment");
   if (!p) return;
   const text = String(b.text || "").trim();
   if (!text) return bad(res, 400, "Commentaire vide.");
@@ -1212,25 +1308,65 @@ app.post("/api/comments", async (req, res) => {
       start: at[0], end: at[1], quote, ...quoteContext(doc, at[0], at[1]),
     });
     notifyComments(p);
+    notifyPeople(req.user, p, c, text, []);
     res.json({ ok: true, comment: c });
   } catch (e) { bad(res, 500, e.message); }
 });
 
 app.post("/api/comments/reply", (req, res) => {
   const b = commentBody(req);
-  const p = commentPath(req, res, b.path, "write");
+  const p = commentPath(req, res, b.path, "comment");
   if (!p) return;
   const text = String(b.text || "").trim();
   if (!text) return bad(res, 400, "Réponse vide.");
   const r = comments.reply(p, String(b.id || ""), { author: commentKey(req.user), authorName: req.user.displayName, color: b.color, text });
   if (!r) return bad(res, 404, "Commentaire introuvable.");
   notifyComments(p);
+  const thread = comments.get(p, String(b.id || ""));
+  notifyPeople(req.user, p, thread, text, thread ? [thread.author, ...thread.replies.map((x) => x.author)] : []);
   res.json({ ok: true, reply: r });
+});
+
+/**
+ * Notifications : les personnes citées (« @identifiant ») et celles qui participent déjà à la
+ * discussion (réponse). Jamais l'auteur lui-même, jamais quelqu'un qui ne voit pas le document.
+ */
+function notifyPeople(author, p, thread, text, participants) {
+  if (!thread) return;
+  const targets = new Map(); // compte → type
+  for (const name of mentionsIn(text)) { const u = users.byUsername(name); if (u) targets.set(u.id, "mention"); }
+  for (const key of participants) {
+    const u = String(key).startsWith("u:") ? users.byUsername(String(key).slice(2)) : null;
+    if (u && !targets.has(u.id)) targets.set(u.id, "reply");
+  }
+  for (const [id, kind] of targets) {
+    const u = users.byId(id);
+    if (!u || u.disabled || u.id === author.id || !access.can(u, p, "read")) continue;
+    notifications.add(u.id, { kind, path: p, cid: thread.id, by: author.displayName, text: String(text).slice(0, 300), quote: String(thread.quote || "").slice(0, 120) });
+    bump(`notif:${u.id}`);
+  }
+}
+
+app.get("/api/notifications", (req, res) => {
+  const list = notifications.list(req.user.id).filter((n) => !n.path || access.can(req.user, n.path, "read"));
+  res.json({ ok: true, notifications: list.slice(0, 50), unread: list.filter((n) => !n.read).length });
+});
+app.post("/api/notifications/read", (req, res) => {
+  const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids.map(String) : "all";
+  res.json({ ok: true, marked: notifications.markRead(req.user.id, ids) });
+});
+
+// Page d'accueil : derniers documents modifiés (que cette personne peut voir et qui existent encore)
+app.get("/api/recent", async (req, res) => {
+  try {
+    const existing = new Set((await repo.listFiles()).map((f) => f.path));
+    res.json({ ok: true, recent: activity.recent((p) => existing.has(p) && access.can(req.user, p, "read"), 15) });
+  } catch (e) { bad(res, 500, e.message); }
 });
 
 app.patch("/api/comments", (req, res) => {
   const b = commentBody(req);
-  const p = commentPath(req, res, b.path, "write");
+  const p = commentPath(req, res, b.path, "comment");
   if (!p) return;
   const text = String(b.text || "").trim();
   if (!text) return bad(res, 400, "Commentaire vide.");
@@ -1244,7 +1380,7 @@ app.patch("/api/comments", (req, res) => {
 
 app.post("/api/comments/resolve", (req, res) => {
   const b = commentBody(req);
-  const p = commentPath(req, res, b.path, "write");
+  const p = commentPath(req, res, b.path, "comment");
   if (!p) return;
   const c = comments.setResolved(p, String(b.id || ""), b.resolved !== false, req.user.displayName);
   if (!c) return bad(res, 404, "Commentaire introuvable.");
@@ -1253,7 +1389,7 @@ app.post("/api/comments/resolve", (req, res) => {
 });
 
 app.delete("/api/comments", (req, res) => {
-  const p = commentPath(req, res, req.query.path, "write");
+  const p = commentPath(req, res, req.query.path, "comment");
   if (!p) return;
   const id = String(req.query.id || ""), replyId = req.query.replyId ? String(req.query.replyId) : null;
   const it = comments.item(p, id, replyId);
@@ -1296,9 +1432,22 @@ app.post("/api/restore", async (req, res) => {
   } catch (e) { bad(res, 500, e.message); }
 });
 
+// Synchronisation demandée : une seule à la fois, au plus une toutes les 2 secondes (quota GitHub).
+// Une demande arrivée pendant une synchronisation attend la suivante (qui verra ses changements).
+let syncRun = null, syncAt = 0;
+async function requestSync() {
+  if (syncRun) await syncRun.catch(() => {});
+  const wait = syncAt + 2000 - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  if (!syncRun) {
+    syncAt = Date.now();
+    syncRun = pollExternal(true).finally(() => { syncRun = null; });
+  }
+  return syncRun;
+}
 app.post("/api/sync", async (_req, res) => {
   try {
-    const r = await pollExternal(true);
+    const r = await requestSync();
     bump("treeVersion");
     res.json({ ok: true, changed: r.changed, mode: repo.mode });
   } catch (e) { bad(res, 500, e.message); }
@@ -1313,8 +1462,12 @@ app.post("/api/create", async (req, res) => {
   try {
     if (await repo.readRaw(p)) return bad(res, 409, "Un document porte déjà ce nom.");
     const title = path.posix.basename(p).replace(/\.[^.]+$/, "");
-    const initial = /\.txt$/i.test(p) ? "" : `# ${title}\n\n`;
+    // contenu de départ : modèle choisi ou copie d'un document (« Dupliquer ») ; sinon un titre
+    const given = typeof req.body.content === "string" ? req.body.content.slice(0, 2 * 1024 * 1024) : null;
+    const initial = given !== null ? given.replace(/\{\{titre\}\}/g, title).replace(/\{\{date\}\}/g, new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }))
+      : /\.txt$/i.test(p) ? "" : `# ${title}\n\n`;
     await serialize(p, () => repo.writeFile(p, initial, `Easydoc : création de ${p} (${req.user.displayName})`));
+    activity.add(p, req.user.displayName, "créé");
     bump("treeVersion");
     res.json({ ok: true, path: p });
   } catch (e) { bad(res, 500, e.message); }
@@ -1389,6 +1542,8 @@ app.post("/api/move", async (req, res) => {
     // 4. données rattachées au chemin
     for (const [a, b] of pairs) {
       comments.movePath(a, b);
+      activity.movePath(a, b);
+      notifications.movePath(a, b);
       const d = authorStore.load(rk, a);
       if (d) { authorStore.save(rk, b, d.text, d.runs, d.v); authorStore.remove(rk, a); }
       searchCache.delete(a);
@@ -1409,9 +1564,52 @@ app.post("/api/move", async (req, res) => {
       states.delete(x.a);
     }
     bump("treeVersion");
+    // 6. les liens vers les fichiers déplacés (et ceux des documents déplacés) sont mis à jour,
+    // une fois les anciens documents ouverts fermés
+    const who = req.user;
+    setTimeout(() => updateLinksAfterMove(pairs, all, who, `${verb} de ${from}`)
+      .catch((e) => console.error(`[liens] ${e.message}`)), 800);
     res.json({ ok: true, path: to, moved: pairs.length });
   } catch (e) { bad(res, 500, e.message); }
 });
+
+/** Réécrit les liens relatifs touchés par un déplacement (documents que la personne peut modifier). */
+async function updateLinksAfterMove(pairs, before, user, what) {
+  const moved = new Map(pairs);
+  const exists = new Set(before.map((f) => f.path));
+  const names = [...moved.keys()].map((p) => path.posix.basename(p));
+  const needles = [...new Set(names.flatMap((n) => [n, encodeURIComponent(n), n.replace(/ /g, "%20")]))];
+  const writes = [];
+  let liveChanged = 0;
+  for (const f of before) {
+    if (kindOf(f.path) !== "markdown") continue;
+    const oldP = f.path, newP = moved.get(oldP) || oldP;
+    if (!access.can(user, newP, "write")) continue;
+    let text;
+    const live = yws.docs.get(newP);
+    const isLive = !!(live && live.getMap("meta").get("loaded"));
+    try {
+      if (isLive) text = live.getText(TEXT).toString();
+      else if (newP === oldP) text = await searchText(f); // texte en cache si inchangé
+      else { const r = await repo.readFile(newP); text = r && r.content; }
+    } catch (_e) { continue; }
+    if (!text || !text.includes("](") && !text.includes("]:")) continue;
+    // document resté en place : seulement s'il cite le nom d'un fichier déplacé
+    if (newP === oldP && !needles.some((n) => text.includes(n))) continue;
+    const out = links.rewrite(text, oldP, newP, moved, exists);
+    if (out === text) continue;
+    if (isLive) {
+      // document ouvert : modifié en direct (les personnes connectées voient le lien changer), puis enregistré
+      live.transact(() => applyDiff(live.getText(TEXT), out), "liens");
+      liveChanged++;
+    } else writes.push({ rel: newP, buf: out });
+  }
+  if (writes.length) {
+    await serialize(`liens:${what}`, () => repo.writeFiles(writes, `Easydoc : liens mis à jour (${what}, ${user.displayName})`));
+    for (const w of writes) searchCache.delete(w.rel);
+  }
+  if (writes.length || liveChanged) console.log(`[liens] ${writes.length + liveChanged} document(s) mis à jour après ${what}`);
+}
 
 app.delete("/api/file", async (req, res) => {
   const p = safeFilePath(String(req.query.path || ""));
@@ -1427,6 +1625,7 @@ app.delete("/api/file", async (req, res) => {
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
     }
     comments.clearPath(p);
+    activity.removePath(p);
     // un secours en attente recréerait le document supprimé au prochain redémarrage
     dropRecovery(p);
     try { fs.unlinkSync(recoveryFile(p)); } catch (_e) {}
@@ -1544,19 +1743,38 @@ server.on("upgrade", (req, socket, head) => {
  * (sync step 1) sont toujours admises ; les modifications (sync step 2 / update) seulement avec
  * le droit d'écriture. Personne n'écrit dans le canal système.
  */
+const awareOwners = new Map(); // document → (identifiant de présence → connexion)
 function guardIncoming(conn, name) {
   const on = conn.on.bind(conn);
+  if (!awareOwners.has(name)) awareOwners.set(name, new Map());
+  const owners = awareOwners.get(name);
+  on("close", () => {
+    wsguard.releaseAwareness(conn, owners);
+    if (!owners.size) awareOwners.delete(name);
+  });
   conn.on = (event, fn) => {
     if (event !== "message") return on(event, fn);
     return on("message", (data, isBinary) => {
       const u8 = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer || data, data.byteOffset || 0, data.byteLength);
-      if (u8.length < 2 && u8[0] !== 1) return;
-      if (u8[0] === 1) return fn(data, isBinary);                 // présence
+      if (u8.length < 2) return;
+      const u = users.byId(conn.edUserId);
+      if (u8[0] === 1) {                                           // présence : nom imposé par le compte
+        const out = wsguard.rewriteAwareness(u8, conn, owners, u);
+        if (out) fn(out, isBinary);
+        return;
+      }
       if (u8[0] !== 0) return;                                     // type inconnu
       if (u8[1] === 0) return fn(data, isBinary);                  // demande d'état
       if (name === SYSTEM_DOC) return;
-      const u = users.byId(conn.edUserId);
-      if (u && !u.disabled && access.can(u, name, "write")) fn(data, isBinary);
+      if (!u || u.disabled || !access.can(u, name, "write")) return;
+      // seul le texte peut être modifié : les informations du serveur (meta) restent intouchables
+      const update = wsguard.syncUpdate(u8);
+      const doc = yws.docs.get(name);
+      if (!update || (doc && !wsguard.textOnly(doc, update, TEXT))) {
+        console.warn(`[temps réel] ${name} : modification refusée (hors du texte) de ${u.username}`);
+        return;
+      }
+      fn(data, isBinary);
     });
   };
 }
@@ -1576,7 +1794,7 @@ wss.on("connection", (conn, req) => {
 async function beforeExit() {
   try { await Promise.race([flushAll(), new Promise((r) => setTimeout(r, 8000))]); } catch (_e) {}
   sessions.flush();
-  try { comments.flush(); } catch (_e) {}
+  try { comments.flush(); activity.flush(); notifications.flush(); } catch (_e) {}
   for (const [name, doc] of openDocs()) if (st(name).dirty) keepRecovery(name, doc); // enregistrement impossible : gardé
   try { await tunnel.stop(true); } catch (_e) {}
 }
@@ -1595,7 +1813,7 @@ const updater = new Updater({
     if (ev.type === "done") console.log(`[mise à jour] ${ev.job.ok ? (ev.job.upToDate ? "déjà à jour" : "terminée") : `échec : ${ev.job.error}${ev.job.rolledBack ? " (version précédente remise)" : ""}`}`);
   },
 });
-if (updater.last && updater.last.ok === true && Date.now() - updater.last.at < 120000) {
+if (updater.last && updater.last.pending) {
   console.log(`[mise à jour] Easydoc ${updater.last.fromVersion} → ${updater.last.toVersion}`);
 }
 // vérification automatique de nouvelle version (affichée aux administrateurs)
@@ -1617,6 +1835,8 @@ async function main() {
     console.log(`Easydoc ${pkg.version} — http://localhost:${PORT} — ${repo.mode === "github"
       ? `GitHub ${repo.options.githubRepo} (${repo.options.githubBranch})` : `local ${LOCAL_DIR}`}`);
     if (tunnel.enabled) tunnel.start().catch((e) => console.error("[tunnel]", e.message));
+    // une minute sans plantage : la mise à jour éventuelle est confirmée
+    setTimeout(() => updater.confirmBoot(), 60000).unref();
   });
 }
 

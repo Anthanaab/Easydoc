@@ -42,6 +42,38 @@ function authUrl(url, token) {
   } catch (_e) { return String(url || ""); }
 }
 
+/**
+ * Garde-fou au démarrage, appelé tout au début de server.js : si la version installée par une
+ * mise à jour n'arrive pas à démarrer (3 démarrages sans confirmation), le code et les
+ * bibliothèques précédents sont remis en place et le service redémarre dessus.
+ */
+function bootGuard({ appDir, dataDir }) {
+  const file = path.join(dataDir, "update-state.json");
+  let m;
+  try { m = JSON.parse(fs.readFileSync(file, "utf8")); } catch (_e) { return; }
+  if (!m || !m.pending || !/^[0-9a-f]{40}$/.test(String(m.prevSha || ""))) return;
+  const write = () => { try { fs.writeFileSync(file, JSON.stringify(m)); } catch (_e) {} };
+  m.boots = (m.boots || 0) + 1;
+  if (m.boots < 3) { write(); return; }
+  try {
+    require("child_process").execFileSync("git", ["-C", appDir, "reset", "--hard", "--quiet", m.prevSha], { stdio: "ignore", timeout: 60000 });
+    const prev = path.join(appDir, "node_modules.prev");
+    if (fs.existsSync(prev)) {
+      fs.rmSync(path.join(appDir, "node_modules"), { recursive: true, force: true });
+      fs.renameSync(prev, path.join(appDir, "node_modules"));
+    }
+    Object.assign(m, { pending: false, ok: false, rolledBack: true, boots: 0,
+      error: `La version ${m.toVersion || m.to} ne démarrait pas : retour automatique à la version ${m.fromVersion || m.from}.` });
+    write();
+    console.error(`[mise à jour] ${m.error}`);
+    process.exit(RESTART_CODE);
+  } catch (e) {
+    Object.assign(m, { pending: false, ok: false, error: `Nouvelle version en échec et retour en arrière impossible : ${e.message}` });
+    write();
+    console.error(`[mise à jour] ${m.error}`);
+  }
+}
+
 class Updater {
   constructor({ appDir, dataDir, currentVersion, beforeRestart, onEvent, tokenProvider, gitBin, fetchHook }) {
     this.appDir = appDir;
@@ -58,15 +90,25 @@ class Updater {
     this.job = null;       // mise à jour en cours / terminée
     this.markerFile = path.join(dataDir, "update-state.json");
     this.last = null;      // dernière mise à jour réussie (après redémarrage)
-    try {
-      const m = JSON.parse(fs.readFileSync(this.markerFile, "utf8"));
-      if (m && m.pending) {
-        m.pending = false;
-        m.ok = m.toVersion === currentVersion;
-        fs.writeFileSync(this.markerFile, JSON.stringify(m));
-      }
-      this.last = m;
-    } catch (_e) {}
+    this.lock = Promise.resolve(); // une seule opération git à la fois (vérification, mise à jour)
+    try { this.last = JSON.parse(fs.readFileSync(this.markerFile, "utf8")); } catch (_e) {}
+  }
+
+  /** Démarrage réussi (appelé une minute après) : la mise à jour est confirmée, l'ancienne copie des bibliothèques supprimée. */
+  confirmBoot() {
+    const m = this.last;
+    if (!m || !m.pending) return;
+    m.pending = false;
+    m.ok = m.toVersion === this.currentVersion || /^[0-9a-f]{7}$/.test(String(m.toVersion || ""));
+    delete m.boots;
+    try { fs.writeFileSync(this.markerFile, JSON.stringify(m)); } catch (_e) {}
+    fs.rm(path.join(this.appDir, "node_modules.prev"), { recursive: true, force: true }, () => {});
+  }
+
+  exclusive(fn) {
+    const run = this.lock.then(fn, fn);
+    this.lock = run.catch(() => {});
+    return run;
   }
 
   /** Mise à jour possible ici ? { ok, reasons[], managed } */
@@ -90,7 +132,9 @@ class Updater {
   async branch() { return (await this.git(["rev-parse", "--abbrev-ref", "HEAD"])).trim(); }
 
   /** Interroge le dépôt d'Easydoc : nouvelle version disponible ? */
-  async checkNow() {
+  checkNow() { return this.exclusive(() => this._checkNow()); }
+
+  async _checkNow() {
     const av = this.availability();
     if (!av.ok) { this.check = { at: Date.now(), error: av.reasons[0] }; return this.check; }
     try {
@@ -115,7 +159,8 @@ class Updater {
         nodeOk, nodeNeeded: need, nodeCurrent: process.versions.node,
         blocked: !nodeOk ? `Cette version demande Node.js ${need} (installé : ${process.versions.node}) : lance une fois « bash easydoc-lxc.sh update » sur Proxmox, qui met Node.js à niveau.`
           : dirty ? "Des fichiers d'Easydoc ont été modifiés à la main sur le serveur : mise à jour depuis l'interface impossible (elle les écraserait)."
-          : ahead > 0 && behind === 0 ? "" : "",
+          : ahead > 0 && behind > 0 ? `Le code d'Easydoc sur ce serveur contient ${ahead} modification${ahead > 1 ? "s" : ""} qui n'existe${ahead > 1 ? "nt" : ""} pas dans la version publiée : mise à jour depuis l'interface impossible (elle les effacerait). Mets-le à jour à la main avec git.`
+          : "",
       };
     } catch (e) {
       this.check = { at: Date.now(), error: `Vérification impossible : ${e.message}` };
@@ -143,7 +188,7 @@ class Updater {
       ],
       log: [],
     };
-    this.execute(job).catch(() => {});
+    this.exclusive(() => this.execute(job)).catch(() => {});
     return job;
   }
 
@@ -153,10 +198,11 @@ class Updater {
       s.status = status; if (detail) s.detail = detail;
       this.onEvent({ type: "progress", job });
     };
-    let prev = null, depsChanged = false, applied = false;
+    let prev = null, depsChanged = false, applied = false, modsSaved = false;
+    const appMods = path.join(this.appDir, "node_modules"), prevMods = path.join(this.appDir, "node_modules.prev");
     try {
       step("fetch", "doing");
-      const c = await this.checkNow();
+      const c = await this._checkNow();
       if (c.error) throw new Error(c.error);
       if (c.blocked) throw new Error(c.blocked);
       if (!c.available) { step("fetch", "done", "déjà à jour"); job.steps.slice(1).forEach((s) => { s.status = "skip"; }); job.running = false; job.ok = true; job.upToDate = true; this.onEvent({ type: "done", job }); return; }
@@ -174,6 +220,10 @@ class Updater {
 
       if (depsChanged) {
         step("deps", "doing");
+        // les bibliothèques actuelles sont mises de côté (et non réinstallées en cas d'échec : le
+        // réseau qui vient de manquer manquerait aussi pour le retour en arrière)
+        fs.rmSync(prevMods, { recursive: true, force: true });
+        if (fs.existsSync(appMods)) { fs.renameSync(appMods, prevMods); modsSaved = true; }
         await this.npmCi();
         step("deps", "done");
       } else step("deps", "skip", "inchangées");
@@ -183,7 +233,9 @@ class Updater {
       step("verify", "done");
 
       step("restart", "doing");
-      fs.writeFileSync(this.markerFile, JSON.stringify({ pending: true, fromVersion: job.from, toVersion: job.to, at: Date.now(), from: prev.slice(0, 7), to: (await this.git(["rev-parse", "--short", "HEAD"])).trim() }));
+      // prevSha : version à remettre en place si la nouvelle ne démarre pas (voir bootGuard)
+      this.last = { pending: true, fromVersion: job.from, toVersion: job.to, at: Date.now(), from: prev.slice(0, 7), prevSha: prev, to: (await this.git(["rev-parse", "--short", "HEAD"])).trim() };
+      fs.writeFileSync(this.markerFile, JSON.stringify(this.last));
       job.ok = true;
       this.onEvent({ type: "restarting", job });
       const av = this.availability();
@@ -203,7 +255,10 @@ class Updater {
       if (applied && prev) {
         try {
           await this.git(["reset", "--hard", "--quiet", prev]);
-          if (depsChanged) await this.npmCi();
+          if (modsSaved) {
+            fs.rmSync(appMods, { recursive: true, force: true });
+            fs.renameSync(prevMods, appMods);
+          } else if (depsChanged) await this.npmCi();
           job.rolledBack = true;
         } catch (e2) { job.error += ` — retour à la version précédente impossible : ${e2.message}`; }
       }
@@ -218,7 +273,8 @@ class Updater {
     const token = this.tokenProvider();
     const args = ["-C", this.appDir, "fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`];
     const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-    if (token && /^https:\/\//.test(origin)) {
+    // le jeton GitHub n'est confié qu'à GitHub (jamais à un autre hébergeur configuré comme origine)
+    if (token && /^https:\/\/github\.com\//i.test(origin)) {
       // dépôt du code privé : le jeton n'est fourni que pour ce téléchargement, par un
       // « credential.helper » jetable (aucune URL ni identifiant n'est écrit dans le dépôt).
       const helper = path.join(this.dataDir, ".git-credential-easydoc");
@@ -290,4 +346,4 @@ class Updater {
   }
 }
 
-module.exports = { Updater, RESTART_CODE };
+module.exports = { Updater, RESTART_CODE, bootGuard };

@@ -18,12 +18,18 @@ const crypto = require("crypto");
 const { promisify } = require("util");
 
 const scrypt = promisify(crypto.scrypt);
-const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-const LEVELS = ["none", "read", "write"];
-const RANK = { none: 0, read: 1, write: 2 };
+// scrypt N=2^14, r=8, p=5 (recommandation OWASP) : même mémoire qu'avant (16 Mo par calcul), 5 fois
+// plus long à attaquer. Les anciennes empreintes (p=1, préfixe « scrypt ») sont refaites à la connexion.
+const SCRYPT_V1 = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const SCRYPT = { N: 16384, r: 8, p: 5, maxmem: 64 * 1024 * 1024 };
+const HASH_ALG = "scrypt-p5";
+// « comment » : lecture + commentaires (relecteurs), sans modifier le texte
+const LEVELS = ["none", "read", "comment", "write"];
+const RANK = { none: 0, read: 1, comment: 2, write: 3 };
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,31}$/;
 const GROUP_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 jours, prolongée à l'usage
+const SESSION_MAX_MS = 90 * 24 * 3600 * 1000; // au plus 90 jours après la connexion, même utilisée chaque jour
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (_e) { return fallback; }
@@ -46,16 +52,19 @@ function writeJsonSecure(file, data) {
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16);
   const hash = await scrypt(password, salt, 64, SCRYPT);
-  return `scrypt$${salt.toString("base64")}$${hash.toString("base64")}`;
+  return `${HASH_ALG}$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
+/** Empreinte d'un ancien format, à refaire à la prochaine connexion réussie. */
+const needsRehash = (stored) => String(stored || "").split("$")[0] !== HASH_ALG;
 async function verifyPassword(password, stored) {
   const [alg, s, h] = String(stored || "").split("$");
-  if (alg !== "scrypt" || !s || !h) {
+  const params = alg === HASH_ALG ? SCRYPT : alg === "scrypt" ? SCRYPT_V1 : null;
+  if (!params || !s || !h) {
     await scrypt(String(password), "easydoc-dummy-salt", 64, SCRYPT); // même durée : ne révèle pas si le compte existe
     return false;
   }
   const expected = Buffer.from(h, "base64");
-  const got = await scrypt(String(password), Buffer.from(s, "base64"), expected.length, SCRYPT);
+  const got = await scrypt(String(password), Buffer.from(s, "base64"), expected.length, params);
   return crypto.timingSafeEqual(expected, got);
 }
 
@@ -181,6 +190,14 @@ class UserStore {
     return u;
   }
 
+  /** Nouvelle empreinte du même mot de passe (format plus robuste) : les sessions restent ouvertes. */
+  async rehash(id, password) {
+    const u = this.byId(id);
+    if (!u) return;
+    u.hash = await hashPassword(String(password));
+    this.save();
+  }
+
   remove(id) {
     const u = this.byId(id);
     if (!u) throw Object.assign(new Error("Compte introuvable."), { status: 404 });
@@ -201,12 +218,15 @@ class SessionStore {
     this.map = new Map(Object.entries((d && d.sessions) || {}));
     this.timer = null;
     const now = Date.now();
-    for (const [k, s] of this.map) if (!s || s.expires < now) this.map.delete(k);
+    for (const [k, s] of this.map) {
+      if (!s || s.expires < now) this.map.delete(k);
+      else if (!s.created) s.created = now; // sessions d'avant la durée maximale : elle commence maintenant
+    }
   }
   static key(token) { return crypto.createHash("sha256").update(String(token)).digest("hex"); }
   create(user) {
     const token = crypto.randomBytes(32).toString("base64url");
-    this.map.set(SessionStore.key(token), { userId: user.id, epoch: user.epoch || 1, expires: Date.now() + SESSION_TTL_MS });
+    this.map.set(SessionStore.key(token), { userId: user.id, epoch: user.epoch || 1, created: Date.now(), expires: Date.now() + SESSION_TTL_MS });
     this.persist();
     return token;
   }
@@ -216,8 +236,8 @@ class SessionStore {
     const s = this.map.get(k);
     if (!s) return null;
     const now = Date.now();
-    if (s.expires < now) { this.map.delete(k); this.persist(); return null; }
-    if (s.expires - now < SESSION_TTL_MS / 2) { s.expires = now + SESSION_TTL_MS; this.persist(); } // prolongation
+    if (s.expires < now || now - (s.created || now) > SESSION_MAX_MS) { this.map.delete(k); this.persist(); return null; }
+    if (s.expires - now < SESSION_TTL_MS / 2) { s.expires = Math.min(now + SESSION_TTL_MS, (s.created || now) + SESSION_MAX_MS); this.persist(); } // prolongation
     return s;
   }
   destroy(token) {
@@ -333,6 +353,6 @@ class AccessStore {
 
 module.exports = {
   UserStore, SessionStore, AccessStore, LEVELS, RANK, SESSION_TTL_MS,
-  hashPassword, verifyPassword, generatePassword, publicUser,
+  hashPassword, verifyPassword, needsRehash, generatePassword, publicUser,
   cleanUsername, cleanDisplayName, checkPassword, cleanGroups, writeJsonSecure,
 };

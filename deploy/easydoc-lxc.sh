@@ -78,7 +78,7 @@ if [ "$ACTION" != create ]; then
       fi
       exit 0;;
     destroy)
-      yesno "Supprimer définitivement le conteneur $CTID ($HN) ?\n\nLes documents enregistrés dans GitHub ne sont pas touchés ; ceux du dépôt local du conteneur seront perdus." 12 70 || cancel
+      yesno "Supprimer définitivement le conteneur $CTID ($HN) ?\n\nSeront perdus : les comptes, les droits d'accès, les commentaires, le réglage du tunnel, les documents du dépôt local et TOUTES les sauvegardes (rangées dans le conteneur). Télécharge d'abord une sauvegarde (Administration → Sauvegardes).\n\nLes documents enregistrés dans GitHub ne sont pas touchés." 16 74 || cancel
       clear
       run pct stop "$CTID" >/dev/null 2>&1 || true
       run pct destroy "$CTID" --purge
@@ -219,11 +219,14 @@ Créer le conteneur et installer Easydoc ?" 21 74 || cancel
         --rootfs "$STORAGE:$DISK" --net0 "$NET0" --unprivileged "$UNPRIV" --onboot "$ONBOOT"
         --features "$FEATURES" --description "Easydoc — éditeur Markdown collaboratif ($DESC_TAG)")
   [ -n "$DNS" ] && ARGS+=(--nameserver "$DNS")
-  [ -n "$PASSWORD" ] && ARGS+=(--password "$PASSWORD")
   run pct create "$CTID" "$TSTORAGE:vztmpl/$TEMPLATE" "${ARGS[@]}" >/dev/null
   ok "Conteneur créé"
   run pct start "$CTID"
   ok "Conteneur démarré"
+  # mot de passe root transmis par l'entrée standard (jamais sur une ligne de commande visible dans « ps »)
+  if [ -n "$PASSWORD" ] && [ -z "$DRY" ]; then
+    printf 'root:%s\n' "$PASSWORD" | pct exec "$CTID" -- chpasswd && ok "Mot de passe root défini"
+  fi
 fi
 
 # -- accès Internet du conteneur ---------------------------------------------------------------------
@@ -255,7 +258,14 @@ done
 
 PASS_ENV=(DEBIAN_FRONTEND=noninteractive "EASYDOC_REPO=$REPO" "EASYDOC_BRANCH=$BRANCH")
 [ -n "${EASYDOC_PORT:-}" ] && PASS_ENV+=("EASYDOC_PORT=$EASYDOC_PORT")
-if [ -n "${EASYDOC_DOCS_REPO:-}" ] && [ -n "${EASYDOC_TOKEN:-}" ]; then PASS_ENV+=("EASYDOC_DOCS_REPO=$EASYDOC_DOCS_REPO" "EASYDOC_TOKEN=$EASYDOC_TOKEN"); fi
+if [ -n "${EASYDOC_DOCS_REPO:-}" ] && [ -n "${EASYDOC_TOKEN:-}" ] && [ -z "$DRY" ]; then
+  # le jeton GitHub passe par un fichier lisible par root seul (une ligne de commande se voit dans « ps ») ;
+  # provision.sh le lit puis le supprime
+  TMP_ENV="$(mktemp /tmp/easydoc-env.XXXXXX)"; chmod 600 "$TMP_ENV"
+  printf 'EASYDOC_DOCS_REPO=%q\nEASYDOC_TOKEN=%q\n' "$EASYDOC_DOCS_REPO" "$EASYDOC_TOKEN" > "$TMP_ENV"
+  pct push "$CTID" "$TMP_ENV" /root/.easydoc-install.env --perms 0600
+  rm -f "$TMP_ENV"
+fi
 if [ -n "$DRY" ]; then
   echo "    [simulation] pct exec $CTID -- env EASYDOC_REPO=$REPO EASYDOC_BRANCH=$BRANCH bash -s < provision.sh" >&2
 else

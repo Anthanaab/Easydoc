@@ -30,9 +30,14 @@ die()  { echo " ${R}✗ $*${N}" >&2; exit 1; }
 trap 'echo; die "Erreur ligne $LINENO : $BASH_COMMAND"' ERR
 
 [ "$(id -u)" -eq 0 ] || die "Lancez ce script en root dans le conteneur."
+# réglages confidentiels (jeton GitHub) déposés par easydoc-lxc.sh : lus puis effacés
+if [ -f /root/.easydoc-install.env ]; then
+  set -a; . /root/.easydoc-install.env; set +a
+  rm -f /root/.easydoc-install.env
+fi
 export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-# -- 1. Paquets + Node.js (>= 18) ------------------------------------------------------------------
+# -- 1. Paquets + Node.js (>= 22) ------------------------------------------------------------------
 info "Paquets de base et Node.js"
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates gnupg git >/dev/null
@@ -63,8 +68,16 @@ if [ -d "$APP_DIR/.git" ]; then
   # .env, data/ et node_modules/ ne sont pas suivis par git : ils sont conservés.
   git -C "$APP_DIR" reset --hard --quiet "origin/$SRC_BRANCH"
 else
-  [ -e "$APP_DIR" ] && mv "$APP_DIR" "$APP_DIR.bak.$(date +%s)"
+  OLD=""
+  if [ -e "$APP_DIR" ]; then OLD="$APP_DIR.bak.$(date +%s)"; mv "$APP_DIR" "$OLD"; fi
   git clone --quiet --branch "$SRC_BRANCH" "https://github.com/$SRC_REPO.git" "$APP_DIR" || die "Clonage impossible."
+  # installation précédente sans git : ses données (comptes, documents, réglages) et sa configuration
+  # sont reprises. Sans elles, le premier visiteur deviendrait administrateur d'une instance vide.
+  if [ -n "$OLD" ]; then
+    [ -d "$OLD/data" ] && cp -a "$OLD/data" "$APP_DIR/data" && ok "Données reprises de l'installation précédente"
+    [ -f "$OLD/.env" ] && cp -a "$OLD/.env" "$APP_DIR/.env"
+    warn "Ancien dossier conservé : $OLD (à supprimer quand tout fonctionne)"
+  fi
 fi
 ok "Version $(git -C "$APP_DIR" log -1 --format='%h — %s' | cut -c1-80)"
 

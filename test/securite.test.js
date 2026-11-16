@@ -90,6 +90,69 @@ test("sécurité", async (t) => {
     assert.equal(await waitFor(() => code, { timeout: 5000 }), 4001);
   });
 
+  await t.test("connexion : une rafale d'essais simultanés reste limitée", async () => {
+    const statuses = await Promise.all(Array.from({ length: 24 }, () => fetch(srv.base + "/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: srv.base },
+      body: JSON.stringify({ username: "compte-inconnu", password: "essai" }),
+    }).then((r) => r.status)));
+    assert.ok(statuses.filter((s) => s === 401).length <= 8, statuses.join(","));
+    assert.ok(statuses.includes(429), statuses.join(","));
+  });
+
+  await t.test("commentaires : un identifiant « __proto__ » n'atteint rien", async () => {
+    await member.post("/api/create", { path: "notes/proto.md" });
+    const c = await member.open("notes/proto.md");
+    c.text.insert(c.text.length, "Passage commenté.\n");
+    await waitFor(() => fs.readFileSync(path.join(srv.repoDir, "notes/proto.md"), "utf8").includes("Passage"));
+    c.close();
+    const at = fs.readFileSync(path.join(srv.repoDir, "notes/proto.md"), "utf8").indexOf("Passage");
+    assert.equal((await member.post("/api/comments", { path: "notes/proto.md", text: "Un avis", quote: "Passage", start: at })).status, 200);
+    for (const id of ["__proto__", "constructor", "toString"]) {
+      assert.equal((await member.post("/api/comments/resolve", { path: "notes/proto.md", id })).status, 404, id);
+      assert.equal((await member.post("/api/comments/reply", { path: "notes/proto.md", id, text: "x" })).status, 404, id);
+    }
+    const list = await member.get(`/api/comments?path=${encodeURIComponent("notes/proto.md")}`);
+    assert.equal(list.json.comments.length, 1);
+    assert.ok(!list.json.comments[0].resolved);
+  });
+
+  await t.test("temps réel : un navigateur ne peut modifier que le texte, jamais les informations du serveur", async () => {
+    await member.post("/api/create", { path: "notes/meta.md" });
+    const pirate = await member.open("notes/meta.md");
+    pirate.doc.getMap("meta").set("loaded", false);
+    pirate.doc.getMap("meta").set("movedTo", "ailleurs.md");
+    pirate.doc.getMap("meta").delete("exists");
+    await new Promise((r) => setTimeout(r, 500));
+    pirate.close();
+    const honnete = await member.open("notes/meta.md");
+    const meta = honnete.doc.getMap("meta");
+    assert.equal(meta.get("loaded"), true);
+    assert.equal(meta.get("exists"), true);
+    assert.equal(meta.get("movedTo"), undefined);
+    honnete.text.insert(honnete.text.length, "Toujours enregistré.\n");
+    assert.ok(await waitFor(() => fs.readFileSync(path.join(srv.repoDir, "notes/meta.md"), "utf8").includes("Toujours enregistré.")));
+    honnete.close();
+  });
+
+  await t.test("présence : le nom affiché est celui du compte, la couleur une vraie couleur", async () => {
+    const a = await admin.open("notes/meta.md");
+    const m = await member.open("notes/meta.md");
+    m.provider.awareness.setLocalStateField("user", { name: "Admin Test", color: "red;background-image:url(https://exemple.invalid/)" });
+    const seen = await waitFor(() => {
+      const s = a.provider.awareness.getStates().get(m.doc.clientID);
+      return s && s.user && s.user;
+    });
+    assert.equal(seen.name, "Membre Test");
+    assert.equal(seen.color, "#6b7280");
+    // effacer la présence d'un autre : refusé
+    const { removeAwarenessStates } = require("y-protocols/awareness");
+    removeAwarenessStates(m.provider.awareness, [a.doc.clientID], "test");
+    await new Promise((r) => setTimeout(r, 400));
+    const third = await admin.open("notes/meta.md");
+    assert.ok(await waitFor(() => third.provider.awareness.getStates().has(a.doc.clientID)), "présence de l'administrateur intacte");
+    a.close(); m.close(); third.close();
+  });
+
   await t.test("CSP : le script de thème de la page est autorisé par son empreinte", async () => {
     const r = await fetch(srv.base + "/");
     const csp = r.headers.get("content-security-policy") || "";

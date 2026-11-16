@@ -1,5 +1,5 @@
 // Easydoc — interface (éditeur collaboratif temps réel adossé à un dépôt git/GitHub).
-import { Y, WebsocketProvider, DOMPurify, createEditor, structuredPatch, applyPatch } from "./vendor/libs.js";
+import { Y, WebsocketProvider, DOMPurify, createEditor, structuredPatch, applyPatch, markdownToHtml } from "./vendor/libs.js";
 
 /* ============================================================================================
  * Utilitaires
@@ -71,6 +71,12 @@ const ICONS = {
   quote: '<path d="M7 7h4v4c0 3-1.5 5-4 6"/><path d="M14 7h4v4c0 3-1.5 5-4 6"/>',
   code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
   more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
+  table: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/>',
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/>',
+  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  copy: '<rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  print: '<path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
@@ -88,9 +94,18 @@ function iconFor(p) {
 function toast(msg, opts = {}) {
   const t = document.createElement("div");
   t.className = "toast" + (opts.error ? " err" : "");
-  t.textContent = msg;
+  const span = document.createElement("span");
+  span.textContent = msg;
+  t.appendChild(span);
+  if (opts.action && opts.onAction) {
+    const b = document.createElement("button");
+    b.className = "toast-act";
+    b.textContent = opts.action;
+    b.onclick = () => { t.remove(); opts.onAction(); };
+    t.appendChild(b);
+  }
   $("#toasts").appendChild(t);
-  setTimeout(() => t.remove(), opts.ms || (opts.error ? 6000 : 3200));
+  setTimeout(() => t.remove(), opts.ms || (opts.action ? 7000 : opts.error ? 6000 : 3200));
 }
 
 async function api(method, url, body) {
@@ -120,7 +135,12 @@ function relTime(ts) {
   if (s < 60) return `il y a ${s} s`;
   const m = Math.round(s / 60);
   if (m < 60) return `il y a ${m} min`;
-  return `il y a ${Math.round(m / 60)} h`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const d = Math.round(h / 24);
+  if (d < 7) return d === 1 ? "hier" : `il y a ${d} jours`;
+  const date = new Date(ts);
+  return "le " + date.toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: date.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
 }
 
 /** Chemin d'un lien/image relatif dans un document, ou null (lien externe, ancre…). */
@@ -157,8 +177,10 @@ function initials(name) {
   const p = name.trim().split(/\s+/).filter(Boolean);
   return ((p[0] || "?")[0] + (p.length > 1 ? p[p.length - 1][0] : "")).toUpperCase();
 }
+/** Couleur placée dans un attribut style : uniquement « #rgb » à « #rrggbbaa » (rien d'autre ne passe). */
+const safeColor = (c) => (/^#[0-9a-f]{3,8}$/i.test(String(c || "")) ? c : "#888888");
 function avatarHTML(user, extra = "") {
-  return `<span class="avatar" style="background:${esc(user.color)}" ${extra}>${esc(initials(user.name))}</span>`;
+  return `<span class="avatar" style="background:${safeColor(user.color)}" ${extra}>${esc(initials(user.name))}</span>`;
 }
 
 let me = null;        // compte connecté
@@ -337,9 +359,11 @@ function connectSystem() {
   sysMap = sysDoc.getMap("sys");
   sys.awareness.setLocalStateField("user", { name: me.name, color: me.color });
   sys.on("sync", (ok) => {
-    if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion"), restart: sysMap.get("restartAt") };
+    if (ok && !seenVersions) seenVersions = { tree: sysMap.get("treeVersion"), config: sysMap.get("configVersion"), restart: sysMap.get("restartAt"), notif: sysMap.get("notif:" + me.id) };
   });
   sys.on("connection-close", (ev) => { if (ev && ev.code === 4001) sessionLost(); });
+  // le temps réel revient : un document ouvert en mode dégradé (HTTP) repasse en direct
+  sys.on("status", (e) => { if (e.status === "connected" && S && S.offline) setTimeout(() => S && retryRealtime(S), 1500); });
   sysMap.observe(() => {
     if (!seenVersions) return;
     const cfg = sysMap.get("configVersion"), tree = sysMap.get("treeVersion");
@@ -347,6 +371,12 @@ function connectSystem() {
     if (rs !== undefined && rs !== seenVersions.restart) { seenVersions.restart = rs; waitForNewVersion(); return; }
     if (cfg !== undefined && cfg !== seenVersions.config) { toast("Le dépôt connecté a changé — rechargement…"); setTimeout(() => location.reload(), 800); return; }
     if (tree !== seenVersions.tree) { seenVersions.tree = tree; refreshTree(); if (isAdmin()) loadRules(); }
+    const nk = me ? sysMap.get("notif:" + me.id) : undefined;
+    if (nk !== undefined && nk !== seenVersions.notif) {
+      seenVersions.notif = nk;
+      loadNotifications();
+      toast("Nouvelle notification : quelqu'un t'a cité ou t'a répondu.", { action: "Voir", onAction: openNotifications });
+    }
   });
   // la liste des fichiers n'est redessinée que si quelqu'un change de document (pas à chaque
   // mouvement de curseur des autres, qui ne change que le numéro de ligne affiché en info-bulle)
@@ -389,6 +419,8 @@ const fileInfo = new Map(); // chemin → { size, kind }
 const closed = new Set(JSON.parse(localStorage.getItem("ed-closed") || "[]"));
 const currentPath = () => (S ? S.path : F ? F.path : null);
 const canWrite = (p) => (fileInfo.get(p) || {}).access === "write";
+/** Commenter : droit « lecture + commentaires » ou modification. */
+const canComment = (p) => ["comment", "write"].includes((fileInfo.get(p) || {}).access);
 
 async function refreshTree() {
   try {
@@ -439,14 +471,16 @@ function fileNode(p, others, showDir, level = 1) {
   el.tabIndex = -1;
   if (active) el.setAttribute("aria-current", "page");
   const people = others.get(hashPath(p)) || [];
-  const dots = people.slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
+  const dots = people.slice(0, 3).map((u) => `<i style="background:${safeColor(u.color)}" title="${esc(u.name)}"></i>`).join("");
   const where = showDir && dirName(p) ? ` <span class="ext">· ${esc(dirName(p))}</span>` : "";
-  const ro = !isAdmin() && (fileInfo.get(p) || {}).access === "read";
+  const acc = (fileInfo.get(p) || {}).access;
+  const ro = !isAdmin() && ["read", "comment"].includes(acc);
+  const roLabel = acc === "comment" ? "lecture et commentaires" : "lecture seule";
   const mark = isAdmin() && adminRules[p] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>`
-    : ro ? `<span class="lockmark" title="Lecture seule">${svg("eye")}</span>` : "";
+    : ro ? `<span class="lockmark" title="${roLabel[0].toUpperCase() + roLabel.slice(1)}">${svg(acc === "comment" ? "comment" : "eye")}</span>` : "";
   el.innerHTML = `${iconFor(p)}<span class="name">${esc(displayName(p))}${where}</span>${mark}<span class="dots">${dots}</span>`;
   // nom lu par un lecteur d'écran : le document, son dossier, la lecture seule et qui l'a ouvert
-  el.setAttribute("aria-label", [displayName(p), showDir && dirName(p) ? `dans ${dirName(p)}` : "", ro ? "lecture seule" : "",
+  el.setAttribute("aria-label", [displayName(p), showDir && dirName(p) ? `dans ${dirName(p)}` : "", ro ? roLabel : "",
     people.length ? `ouvert par ${people.map((u) => u.name).join(", ")}` : ""].filter(Boolean).join(", "));
   el.onclick = () => { openFile(p); $("#app").classList.remove("nav-open"); };
   return el;
@@ -563,8 +597,13 @@ const ED = createEditor(edHost, {
   openLink(href) {
     if (!href) return;
     const target = S ? resolveRel(href, S.path) : null;
-    if (target && files.includes(target)) openFile(target);
-    else if (/^(https?:|mailto:)/i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
+    if (target && files.includes(target)) return openFile(target);
+    if (target && !/\.[a-z0-9]{1,5}$/i.test(target) && files.includes(target + ".md")) return openFile(target + ".md"); // lien sans « .md »
+    if (/^(https?:|mailto:)/i.test(href)) return window.open(href, "_blank", "noopener,noreferrer");
+    if (target) toast(`Document introuvable : ${target} (renommé, déplacé ou supprimé ?)`, { error: true });
+  },
+  linkTapped(href) {
+    toast(`Lien : ${href}`, { action: "Ouvrir", onAction: () => this.openLink(href) });
   },
 });
 const docKind = (s) => (s.kind === "text" ? "text" : "markdown");
@@ -596,7 +635,7 @@ function layoutSoon() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnim
 /* ---- Barre de mise en forme ---- */
 for (const b of $$("#fmtBar [data-fmt]")) {
   b.addEventListener("mousedown", (e) => e.preventDefault()); // l'éditeur garde le curseur
-  b.addEventListener("click", () => ED.format(b.dataset.fmt));
+  b.addEventListener("click", () => (b.dataset.fmt === "link" ? openLinkDialog() : ED.format(b.dataset.fmt)));
 }
 function updateFmtBar() {
   const show = !!(S && S.loaded && S.kind === "markdown" && !ED.readOnly);
@@ -616,7 +655,7 @@ function closeSession() {
   S = null;
   ED.open({ kind: "markdown", text: "", readOnly: true }); // détache l'éditeur du document fermé
   updateFmtBar();
-  clearTimeout(s.fallbackTimer); clearTimeout(s.offlineTimer); clearInterval(s.retryTimer);
+  clearTimeout(s.fallbackTimer); clearTimeout(s.offlineTimer); clearInterval(s.retryTimer); clearInterval(s.realtimeTimer);
   try { s.provider && s.provider.destroy(); } catch (_e) {}
   try { s.ydoc.destroy(); } catch (_e) {}
   setPresence("path", null);
@@ -626,6 +665,7 @@ function showEmpty() {
   closeSession();
   setPresence("path", null);
   setArea("empty");
+  renderHome();
   $("#crumbs").innerHTML = "";
   history.replaceState(null, "", location.pathname);
   document.title = "Easydoc";
@@ -641,8 +681,12 @@ function renderCrumbs(p) {
 function enterPath(path) {
   renderCrumbs(path);
   document.title = `${displayName(path)} — Easydoc`;
-  history.replaceState(null, "", "#/" + encPath(path));
+  // un nouveau document = une entrée d'historique : le bouton Précédent du navigateur y ramène
+  const h = "#/" + encPath(path);
+  if (location.hash !== h && location.hash) history.pushState(null, "", h); else history.replaceState(null, "", h);
   setPresence("path", hashPath(path));
+  rememberRecent(path);
+  updateFavButton();
 }
 
 function openFile(path, opts = {}) {
@@ -657,6 +701,7 @@ function openFile(path, opts = {}) {
     loaded: false, connected: false, offline: false, reconnecting: false,
     lastLocalEdit: 0, savedSeen: 0, dirty: false, gotoLine: opts.line || 0,
     pendingText: opts.pendingText ?? null, pendingBase: opts.pendingBase ?? null, // frappe pendant une coupure
+    realtimeTries: opts.realtimeTries || 0, wantComment: opts.comment || null,
   };
   // annuler / rétablir : seulement mes propres frappes (l'éditeur ajoute son origine)
   s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set(), captureTimeout: 600 });
@@ -692,12 +737,16 @@ function openFile(path, opts = {}) {
   s.meta.observe((event) => {
     if (S !== s) return;
     const keys = event.keysChanged;
+    const wasLoaded = s.loaded; // à l'ouverture, toutes les clés arrivent : pas d'annonce pour d'anciens évènements
     if (s.meta.get("loaded") && !s.loaded) onLoaded(s);
     if (keys.has("savedAt")) {
       s.savedSeen = Date.now();
       if (s.lastLocalEdit <= s.savedSeen) { s.dirty = false; s.confirmedText = ED.text; } // tout est arrivé au serveur
     }
-    if (keys.has("externalAt") && s.loaded) {
+    if (keys.has("restoredAt") && wasLoaded && restoringPath !== s.path) {
+      toast("Ce document vient d'être ramené à une version antérieure par quelqu'un (Historique pour le détail).", { ms: 7000 });
+    }
+    if (keys.has("externalAt") && wasLoaded) {
       const by = s.meta.get("externalBy");
       toast(by && by !== "Modification externe" ? `Document mis à jour depuis le dépôt par ${by}.` : "Document mis à jour depuis le dépôt (modification externe).");
     }
@@ -716,6 +765,18 @@ function openFile(path, opts = {}) {
 
   // Temps réel injoignable (proxy sans WebSocket, pare-feu…) : on ouvre quand même via HTTP.
   s.fallbackTimer = setTimeout(() => { if (S === s && !s.loaded) startOffline(s); }, 6000);
+  if (opts.focus) s.focusOnLoad = true;
+}
+
+/**
+ * Mode dégradé (HTTP) : dès que le temps réel répond de nouveau (canal système connecté), le
+ * document est rouvert en direct ; ce qui a été tapé entre-temps est réintégré.
+ */
+function retryRealtime(s) {
+  if (S !== s || !s.offline || !s.loaded || s.saving) return;
+  if (!sys || !sys.wsconnected) return;
+  if ((s.realtimeTries = (s.realtimeTries || 0) + 1) > 5) return; // proxy qui coupe les documents seulement : on n'insiste pas
+  openFile(s.path, { force: true, pendingText: s.dirty ? ED.text : null, pendingBase: s.offlineBase, realtimeTries: s.realtimeTries });
 }
 
 function onLoaded(s) {
@@ -733,8 +794,10 @@ function onLoaded(s) {
   if (s.pendingText != null && !ro) reintegrate(s, ED.text); // passe par l'éditeur : partagé avec les autres
   s.pendingText = null;
   s.savedSeen = Date.now();
-  renderTOC(); renderStatus(); updateButtons(); renderOverlay();
+  renderTOC(); renderStatus(); updateButtons(); renderOverlay(); scheduleWordCount();
   if (s.gotoLine) goToLine(s.gotoLine); // ouvert depuis un résultat de recherche
+  else if (s.focusOnLoad && !ro) { ED.setSelection(ED.length, ED.length); ED.focus(); } // document qu'on vient de créer
+  if (s.realtimeTries) toast("Temps réel rétabli : la collaboration en direct reprend.");
   // charge les commentaires dès l'ouverture pour afficher les bulles dans la marge
   loadComments();
 }
@@ -829,7 +892,9 @@ async function startOffline(s) {
     s.pendingText = null;
     renderTOC(); renderStatus(); updateButtons();
     if (s.gotoLine) goToLine(s.gotoLine);
-    toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
+    if (!s.realtimeTries) toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
+    clearInterval(s.realtimeTimer);
+    s.realtimeTimer = setInterval(() => retryRealtime(s), 20000 * Math.min(1 + s.realtimeTries, 4));
   } catch (e) {
     toast("Impossible d'ouvrir le document : " + e.message, { error: true });
   }
@@ -838,6 +903,12 @@ async function startOffline(s) {
 async function saveNow(manual) {
   if (!S || !S.loaded) return;
   const s = S;
+  if (ED.readOnly) { if (manual) toast("Document en lecture seule : rien à enregistrer."); return; }
+  // connexion temps réel coupée : le serveur n'a pas reçu la frappe récente, « Enregistré » serait faux
+  if (!s.offline && (s.reconnecting || !s.connected)) {
+    if (manual) toast("Connexion interrompue : tes modifications sont gardées ici et seront enregistrées dès son retour.", { error: true });
+    return;
+  }
   const body = { path: s.path };
   const sent = ED.text;
   if (s.offline) { body.content = sent; body.base = s.offlineBase; }
@@ -1341,9 +1412,25 @@ async function openHistory() {
           api("GET", `/api/history/diff?path=${encodeURIComponent(p)}&sha=${encodeURIComponent(item.dataset.sha)}`).then((r) => {
             diff.dataset.loaded = "1";
             diff.innerHTML = (r.patch ? patchHTML(r.patch) : `<div class="muted-sm" style="padding:10px 12px">${r.binary ? "Fichier binaire : pas de détail ligne par ligne." : "Aucune modification de contenu dans cette version."}</div>`)
-              + (writable ? `<div class="hist-restore"><button class="btn btn-danger-soft" data-act="restore" data-sha="${esc(item.dataset.sha)}">${svg("download")}Revenir à cette version</button></div>` : "");
+              + `<div class="hist-restore">${isEditable(p) && r.status !== "removed" ? `<button class="btn" data-act="view">${svg("eye")}Voir le document à cette version</button>` : ""}`
+              + (writable ? `<button class="btn btn-danger-soft" data-act="restore" data-sha="${esc(item.dataset.sha)}">${svg("download")}Revenir à cette version</button>` : "") + "</div>";
             const rb = $('[data-act="restore"]', diff);
             if (rb) rb.onclick = () => confirmRestore(p, rb.dataset.sha, item.dataset.date);
+            const vb = $('[data-act="view"]', diff);
+            if (vb) vb.onclick = async () => {
+              const shown = diff.querySelector(".version-view");
+              if (shown) { shown.remove(); vb.lastChild.textContent = "Voir le document à cette version"; return; }
+              vb.disabled = true;
+              try {
+                const v = await api("GET", `/api/history/content?path=${encodeURIComponent(p)}&sha=${encodeURIComponent(item.dataset.sha)}`);
+                const view = document.createElement("div");
+                view.className = "prose version-view";
+                view.innerHTML = renderMarkdown(v.content, p);
+                diff.insertBefore(view, diff.querySelector(".hist-restore"));
+                vb.lastChild.textContent = "Masquer le document";
+              } catch (e) { toast(e.message, { error: true }); }
+              finally { vb.disabled = false; }
+            };
           }).catch((e) => { diff.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
         };
       }
@@ -1360,7 +1447,7 @@ function renderSearchResults() {
   const q = $("#search").value.trim();
   const tree = $("#tree");
   if (!q) { srBox.hidden = true; srBox.innerHTML = ""; renderTree(); return; }
-  tree.innerHTML = '<div class="tree-empty">Recherche…</div>';
+  renderTree(); // la liste reste filtrée par nom pendant la recherche dans le contenu
   srBox.hidden = false;
   const seq = ++srSeq;
   srBox.innerHTML = '<div class="sr-hint">Recherche dans le contenu…</div>';
@@ -1371,18 +1458,24 @@ function renderSearchResults() {
       const d = await api("GET", "/api/search?q=" + encodeURIComponent(q));
       if (seq !== srSeq) return;
       if (!d.results.length) { srBox.innerHTML = '<div class="sr-hint">Aucun résultat dans le contenu.</div>'; return; }
-      const escQ = esc(q);
-      srBox.innerHTML = d.results.map((r) => {
-        const escR = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // échappe la requête pour le RegExp
-        const rx = new RegExp("(" + escR + ")", "ig");
-        const snip = esc(r.snippet).replace(rx, "<em>$1</em>");
-        const dot = dirName(r.path) ? `<span class="ln">· ${esc(dirName(r.path))}</span>` : "";
-        return `<button class="sr" data-path="${esc(r.path)}" data-line="${r.line}">
-          <span class="p"><span>${esc(displayName(r.path))}${dot}</span><span class="ln">ligne ${r.line}</span></span>
-          <span class="x">${snip}</span></button>`;
-      }).join("");
+      // résultats regroupés par document ; le passage trouvé est mis en valeur (sans accents ni majuscules)
+      srBox.innerHTML = d.results.map((g) => {
+        const dot = dirName(g.path) ? `<span class="ln">· ${esc(dirName(g.path))}</span>` : "";
+        const more = g.count > g.matches.length ? `<span class="ln">${g.count} passages</span>` : "";
+        const head = `<button class="sr sr-doc" data-path="${esc(g.path)}" data-line="${g.matches[0] ? g.matches[0].line : 0}">
+          <span class="p"><span>${iconFor(g.path)}${esc(displayName(g.path))}${dot}</span>${more}</span></button>`;
+        return `<div class="sr-group" role="group" aria-label="${esc(displayName(g.path))}">${head}${g.matches.map((m) => `
+          <button class="sr sr-line" data-path="${esc(g.path)}" data-line="${m.line}">
+            <span class="x"><span class="ln">${m.line}</span>${esc(m.before)}<em>${esc(m.match)}</em>${esc(m.after)}</span></button>`).join("")}</div>`;
+      }).join("") + (d.truncated ? '<div class="sr-hint">D\'autres résultats existent : précise la recherche.</div>' : "");
       for (const el of $$(".sr", srBox)) {
-        el.onclick = () => { openFile(el.dataset.path, { line: Number(el.dataset.line) }); srBox.hidden = true; $("#search").value = ""; renderTree(); };
+        el.onclick = () => { openFile(el.dataset.path, Number(el.dataset.line) ? { line: Number(el.dataset.line) } : {}); srBox.hidden = true; $("#search").value = ""; renderTree(); };
+        el.onkeydown = (e) => {
+          const all = $$(".sr", srBox), i = all.indexOf(el);
+          if (e.key === "ArrowDown") { e.preventDefault(); (all[i + 1] || $("#tree .node") || el).focus(); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); (all[i - 1] || $("#search")).focus(); }
+          else if (e.key === "Escape") { e.preventDefault(); $("#search").focus(); }
+        };
       }
     } catch (e) { if (seq === srSeq) srBox.innerHTML = `<div class="sr-hint">${esc(e.message)}</div>`; }
   }, 250);
@@ -1491,7 +1584,21 @@ function updateTocCurrent() {
     if (r.top < lr.top || r.bottom > lr.bottom) cur.scrollIntoView({ block: "nearest" });
   }
 }
-function scheduleToc() { if (!$("#outline").hidden) { clearTimeout(tocT); tocT = setTimeout(renderTOC, 400); } }
+function scheduleToc() {
+  if (!$("#outline").hidden) { clearTimeout(tocT); tocT = setTimeout(renderTOC, 400); }
+  scheduleWordCount();
+}
+/** Nombre de mots (affiché dans l'état du document), recalculé après une pause de frappe. */
+let wordsT = null;
+function scheduleWordCount() {
+  clearTimeout(wordsT);
+  wordsT = setTimeout(() => {
+    if (!S || !S.loaded) return;
+    const t = ED.text.replace(/^```[\s\S]*?^```/gm, " ").replace(/[#>*_`~|\[\]()!-]/g, " ");
+    S.words = (t.match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu) || []).length;
+    renderStatus();
+  }, 600);
+}
 /** Document fermé : le plan se vide (il réapparaît à l'ouverture du suivant). */
 function closeToc() {
   clearTimeout(tocT);
@@ -1519,6 +1626,374 @@ let outlineResizeT = null;
 window.addEventListener("resize", () => { clearTimeout(outlineResizeT); outlineResizeT = setTimeout(() => { if (S && S.loaded) renderTOC(); }, 150); });
 
 
+/* ---- Rendu, impression et export ---- */
+/** Adresses des liens et images d'un document : relatives au dépôt → adresses d'Easydoc. */
+function mdUrl(fromPath, absolute) {
+  return (u, kind) => {
+    if (!u || /^[a-z][a-z0-9+.-]*:/i.test(u) || u.startsWith("#") || u.startsWith("//")) return u;
+    const t = resolveRel(u, fromPath);
+    if (!t) return u;
+    if (kind === "image") return (absolute ? location.origin : "") + rawUrl(t);
+    const doc = files.includes(t) ? t : files.includes(t + ".md") ? t + ".md" : t;
+    return location.origin + location.pathname + "#/" + encPath(doc);
+  };
+}
+/** Markdown → HTML nettoyé, prêt à insérer dans la page. */
+function renderMarkdown(text, fromPath, absolute) {
+  const html = kindOf(fromPath) === "text" ? `<pre>${esc(text)}</pre>` : markdownToHtml(text, { url: mdUrl(fromPath, absolute) });
+  return DOMPurify.sanitize(html, { ADD_ATTR: ["start"] });
+}
+// Impression (Ctrl+P ou « Exporter ») : le document entier, mis en page, sans l'interface autour
+// (l'éditeur ne dessine que la partie visible du texte : il ne peut pas être imprimé tel quel)
+function fillPrintView() {
+  const pv = $("#printView");
+  if (!S || !S.loaded) { pv.innerHTML = ""; return false; }
+  pv.innerHTML = `<article class="prose print-doc">${renderMarkdown(ED.text, S.path)}</article>`;
+  return true;
+}
+window.addEventListener("beforeprint", fillPrintView);
+window.addEventListener("afterprint", () => { $("#printView").innerHTML = ""; });
+function printDoc() {
+  if (!fillPrintView()) return;
+  setTimeout(() => window.print(), 50); // laisse les images commencer à charger
+}
+async function inlineImages(root) {
+  let budget = 15 * 1024 * 1024;
+  for (const img of root.querySelectorAll("img[src]")) {
+    const src = img.getAttribute("src");
+    if (!src.startsWith(location.origin + "/api/raw")) continue;
+    try {
+      const r = await fetch(src);
+      const b = await r.blob();
+      if (!r.ok || b.size > budget) continue;
+      budget -= b.size;
+      img.src = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); });
+    } catch (_e) {}
+  }
+}
+const EXPORT_CSS = `body{margin:0;background:#fff;color:#1f2328;font:16px/1.65 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+article{max-width:760px;margin:40px auto;padding:0 24px}h1,h2,h3,h4{line-height:1.25;margin:1.6em 0 .6em}h1{font-size:2em}h2{font-size:1.5em}h3{font-size:1.2em}
+a{color:#0969da}img{max-width:100%}code{font:.9em ui-monospace,Consolas,monospace;background:#f3f4f6;padding:.1em .3em;border-radius:4px}
+pre{background:#f6f8fa;padding:12px 14px;border-radius:6px;overflow:auto}pre code{background:none;padding:0}
+blockquote{margin:1em 0;padding:0 1em;color:#57606a;border-left:4px solid #d0d7de}table{border-collapse:collapse;margin:1em 0}
+th,td{border:1px solid #d0d7de;padding:6px 12px}th{background:#f6f8fa}li.task{list-style:none}li.task input{margin:0 .4em 0 -1.3em}hr{border:0;border-top:1px solid #d0d7de;margin:2em 0}`;
+function downloadBlob(name, type, data) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([data], { type }));
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+async function exportHtml(p) {
+  const box = document.createElement("article");
+  box.innerHTML = renderMarkdown(ED.text, p, true);
+  await inlineImages(box); // images incluses dans le fichier : il s'ouvre partout, même hors connexion
+  const title = esc(displayName(p));
+  downloadBlob(`${displayName(p)}.html`, "text/html;charset=utf-8",
+    `<!doctype html>\n<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${EXPORT_CSS}</style></head>\n<body>${box.outerHTML}</body></html>\n`);
+}
+function openExport() {
+  const p = currentPath();
+  if (!p) return;
+  const doc = !!(S && S.loaded && S.path === p);
+  openModal({
+    title: "Exporter ou imprimer",
+    subtitle: `<strong>${esc(fileName(p))}</strong>`,
+    body: `<div class="export-list">
+      ${doc ? `<button class="exp" data-x="print">${svg("file")}<span><b>Imprimer ou enregistrer en PDF</b><small>Le document entier, mis en page, sans l'interface (choisir « Enregistrer au format PDF » comme imprimante).</small></span></button>
+      <button class="exp" data-x="html">${svg("download")}<span><b>Page web (.html)</b><small>Un seul fichier, images comprises ; s'ouvre dans un navigateur, Word ou LibreOffice.</small></span></button>` : ""}
+      <button class="exp" data-x="raw">${svg("download")}<span><b>Fichier d'origine (${esc(path2ext(p))})</b><small>Le fichier tel qu'il est enregistré dans le dépôt.</small></span></button>
+    </div><div class="msg"></div>`,
+    foot: '<button class="btn" data-act="close">Fermer</button>',
+    onMount(card) {
+      $('[data-act="close"]', card).onclick = closeModal;
+      for (const b of $$(".exp", card)) b.onclick = async () => {
+        const x = b.dataset.x;
+        if (x === "print") { closeModal(); printDoc(); return; }
+        if (x === "raw") { closeModal(); const a = document.createElement("a"); a.href = rawUrl(p, true); a.download = fileName(p); document.body.appendChild(a); a.click(); a.remove(); return; }
+        b.disabled = true;
+        try { await exportHtml(p); closeModal(); } catch (e) { setMsg(card, e.message, "err"); b.disabled = false; }
+      };
+    },
+  });
+}
+const path2ext = (p) => (/\.[^./]+$/.exec(p) || [".md"])[0];
+$("#btnExport").onclick = openExport;
+
+/* ============================================================================================
+ * Liens, accueil, favoris, modèles, duplication, notifications, mentions
+ * ========================================================================================== */
+const foldName = (s) => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/** Fenêtre « Lien » : un document du dépôt (recherche par nom) ou une adresse web. */
+function openLinkDialog() {
+  if (!S || !S.loaded || ED.readOnly) return;
+  const { from, to } = ED.selection;
+  const selected = ED.slice(from, to);
+  let chosen = null;
+  openModal({
+    title: "Insérer un lien",
+    body: `<div class="field"><label for="lkQ">Document ou adresse web</label>
+        <input class="input" id="lkQ" placeholder="Nom d'un document, ou https://…" autocomplete="off" role="combobox" aria-controls="lkList" aria-expanded="true" /></div>
+      <div class="lk-list" id="lkList" role="listbox" aria-label="Documents"></div>
+      <div class="field"><label for="lkText">Texte du lien</label><input class="input" id="lkText" value="${esc(selected.split("\n")[0])}" /></div>
+      <div class="msg"></div>`,
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Insérer</button>',
+    onMount(card) {
+      const q = $("#lkQ", card), list = $("#lkList", card), txt = $("#lkText", card);
+      const isUrl = (v) => /^(https?:\/\/|mailto:|www\.)/i.test(v.trim());
+      const draw = () => {
+        const v = q.value.trim();
+        if (isUrl(v)) { chosen = null; list.innerHTML = `<div class="sr-hint">Adresse web : ${esc(v)}</div>`; return; }
+        const n = foldName(v);
+        const hits = files.filter((p) => p !== S.path && (!n || foldName(p).includes(n))).slice(0, 40);
+        if (chosen && !hits.includes(chosen)) chosen = null;
+        if (!chosen && hits.length && n) chosen = hits[0];
+        list.innerHTML = hits.map((p) => `<button class="lk${p === chosen ? " on" : ""}" role="option" aria-selected="${p === chosen}" data-p="${esc(p)}">${iconFor(p)}<span>${esc(displayName(p))}</span><small>${esc(dirName(p))}</small></button>`).join("")
+          || '<div class="sr-hint">Aucun document de ce nom.</div>';
+        for (const b of $$(".lk", list)) {
+          b.onclick = () => { chosen = b.dataset.p; draw(); txt.focus(); };
+          b.ondblclick = () => { chosen = b.dataset.p; insert(); };
+        }
+      };
+      const insert = () => {
+        const v = q.value.trim();
+        let href, label = txt.value.trim();
+        if (isUrl(v)) { href = /^www\./i.test(v) ? "https://" + v : v; label = label || v; }
+        else if (chosen) { href = relLink(S.path, chosen); label = label || displayName(chosen); }
+        else { setMsg(card, "Choisis un document dans la liste ou tape une adresse web.", "err"); return; }
+        const image = chosen && kindOf(chosen) === "image" && !isUrl(v);
+        const md = `${image ? "!" : ""}[${label.replace(/[[\]]/g, "\\$&")}](${href.replace(/ /g, "%20")})`;
+        closeModal();
+        ED.replaceRange(from, to, md);
+      };
+      q.addEventListener("input", draw);
+      q.addEventListener("keydown", (e) => {
+        const items = $$(".lk", list), i = items.findIndex((b) => b.dataset.p === chosen);
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+          if (next) { chosen = next.dataset.p; draw(); $(".lk.on", list) && $(".lk.on", list).scrollIntoView({ block: "nearest" }); }
+        } else if (e.key === "Enter") { e.preventDefault(); insert(); }
+      });
+      txt.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); insert(); } });
+      $('[data-act="cancel"]', card).onclick = closeModal;
+      $('[data-act="ok"]', card).onclick = insert;
+      if (selected && isUrl(selected)) q.value = selected;
+      draw();
+      q.focus();
+    },
+  });
+}
+
+/* ---- Favoris et documents récents (gardés dans ce navigateur, par compte) ---- */
+const listKey = (k) => `ed-${k}:${me ? me.username : ""}`;
+function loadList(k) { try { const v = JSON.parse(localStorage.getItem(listKey(k)) || "[]"); return Array.isArray(v) ? v : []; } catch (_e) { return []; } }
+function saveList(k, v) { try { localStorage.setItem(listKey(k), JSON.stringify(v)); } catch (_e) {} }
+function rememberRecent(p) {
+  const l = loadList("recent").filter((x) => x.p !== p);
+  l.unshift({ p, at: Date.now() });
+  saveList("recent", l.slice(0, 30));
+}
+const isFav = (p) => loadList("fav").includes(p);
+function toggleFav(p = currentPath()) {
+  if (!p) return;
+  const l = loadList("fav");
+  saveList("fav", l.includes(p) ? l.filter((x) => x !== p) : [p, ...l]);
+  updateFavButton();
+  toast(isFav(p) ? "Ajouté aux favoris (page d'accueil)." : "Retiré des favoris.");
+}
+function updateFavButton() {
+  const b = $("#btnFav"), p = currentPath();
+  if (!b) return;
+  b.hidden = !p;
+  const on = !!p && isFav(p);
+  b.classList.toggle("on", on);
+  b.setAttribute("aria-pressed", String(on));
+  b.title = on ? "Retirer des favoris" : "Ajouter aux favoris";
+}
+$("#btnFav").onclick = () => toggleFav();
+$("#btnHome").onclick = () => { showEmpty(); $("#app").classList.remove("nav-open"); };
+
+/* ---- Page d'accueil ---- */
+async function renderHome() {
+  const box = $("#empty");
+  if (!box || !me) return;
+  const exists = new Set(files);
+  const item = (p, meta) => `<button class="home-item" data-p="${esc(p)}">${iconFor(p)}<span class="hi-name">${esc(displayName(p))}</span><span class="hi-meta">${meta || esc(dirName(p))}</span></button>`;
+  const favs = loadList("fav").filter((p) => exists.has(p));
+  const recents = loadList("recent").filter((x) => exists.has(x.p)).slice(0, 8);
+  const hour = new Date().getHours();
+  box.innerHTML = `<div class="home">
+    <h2>${hour < 18 && hour >= 5 ? "Bonjour" : "Bonsoir"} ${esc((me.name || "").split(" ")[0])}</h2>
+    <div class="home-actions">
+      <button class="btn btn-primary" data-h="new">${svg("plus")}Nouveau document</button>
+      <button class="btn" data-h="upload">${svg("upload")}Importer des fichiers</button>
+      ${files.includes("README.md") ? `<button class="btn" data-h="readme">${svg("file")}Lire le README</button>` : ""}
+    </div>
+    <section><h3>${svg("star")}Favoris</h3>${favs.length ? `<div class="home-grid">${favs.map((p) => item(p)).join("")}</div>`
+      : '<p class="muted-sm">Ajoute un document à tes favoris avec l\'étoile à côté de son nom, en haut.</p>'}</section>
+    <section><h3>${svg("history")}Ouverts récemment</h3>${recents.length ? `<div class="home-grid">${recents.map((x) => item(x.p, esc(relTime(x.at)))).join("")}</div>`
+      : '<p class="muted-sm">Les documents que tu ouvres apparaîtront ici.</p>'}</section>
+    <section><h3>${svg("pencil")}Modifiés récemment</h3><div class="home-grid" id="homeRecent"><p class="muted-sm">Chargement…</p></div></section>
+  </div>`;
+  const wire = (root) => { for (const b of $$(".home-item", root)) b.onclick = () => openFile(b.dataset.p); };
+  wire(box);
+  $('[data-h="new"]', box).onclick = newDocument;
+  $('[data-h="upload"]', box).onclick = () => $("#fileInput").click();
+  const rb = $('[data-h="readme"]', box);
+  if (rb) rb.onclick = () => openFile("README.md");
+  try {
+    const d = await api("GET", "/api/recent");
+    const el = $("#homeRecent");
+    if (!el) return;
+    el.innerHTML = d.recent.length ? d.recent.map((r) => item(r.path, `${esc(relTime(r.at))}${r.by ? " · " + esc(r.by) : ""}`)).join("")
+      : '<p class="muted-sm">Aucune modification récente.</p>';
+    wire(el);
+  } catch (_e) { const el = $("#homeRecent"); if (el) el.innerHTML = '<p class="muted-sm">Indisponible pour le moment.</p>'; }
+}
+
+/* ---- Modèles de document ---- */
+const TEMPLATES = {
+  blank: { label: "Document vide", hint: "Seulement le titre", text: null },
+  meeting: { label: "Compte rendu de réunion", hint: "Participants, ordre du jour, décisions, actions",
+    text: "# {{titre}}\n\n**Date :** {{date}}  \n**Participants :** \n\n## Ordre du jour\n\n1. \n\n## Échanges\n\n\n## Décisions\n\n- \n\n## Actions\n\n- [ ] Action — @qui — pour quand\n" },
+  project: { label: "Note de projet", hint: "Contexte, objectifs, étapes, points ouverts",
+    text: "# {{titre}}\n\n> Créé le {{date}}\n\n## Contexte\n\n\n## Objectifs\n\n- \n\n## Étapes\n\n| Étape | Responsable | Échéance | État |\n| --- | --- | --- | --- |\n|  |  |  |  |\n\n## Points ouverts\n\n- \n" },
+  howto: { label: "Procédure", hint: "Prérequis et étapes numérotées",
+    text: "# {{titre}}\n\n> Objectif : …\n\n## Prérequis\n\n- \n\n## Étapes\n\n1. \n2. \n3. \n\n## En cas de problème\n\n\n_Mise à jour : {{date}}_\n" },
+  todo: { label: "Liste de tâches", hint: "À faire, en cours, terminé",
+    text: "# {{titre}}\n\n## À faire\n\n- [ ] \n\n## En cours\n\n- [ ] \n\n## Terminé\n\n- [x] Créer la liste\n" },
+};
+
+/* ---- Dupliquer ---- */
+function duplicateDocument() {
+  if (!S || !S.loaded) return;
+  const p = S.path, ext = path2ext(p), stem = p.slice(0, p.length - ext.length);
+  openModal({
+    title: "Dupliquer le document",
+    subtitle: "Une copie du texte actuel (sans les commentaires ni l'historique).",
+    body: `<div class="field"><label for="dupName">Nom de la copie</label><input class="input" id="dupName" value="${esc(stem + " (copie)")}" /></div><div class="msg"></div>`,
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Dupliquer</button>',
+    onMount(card) {
+      const input = $("#dupName", card);
+      input.select();
+      const go = async () => {
+        const v = input.value.trim();
+        if (!v) return input.focus();
+        $('[data-act="ok"]', card).disabled = true;
+        try {
+          const d = await api("POST", "/api/create", { path: /\.[a-z0-9]{1,5}$/i.test(v) ? v : v + ext, content: ED.text });
+          closeModal();
+          await refreshTree();
+          openFile(d.path);
+          toast("Copie créée.");
+        } catch (e) { setMsg(card, e.message, "err"); $('[data-act="ok"]', card).disabled = false; }
+      };
+      $('[data-act="ok"]', card).onclick = go;
+      $('[data-act="cancel"]', card).onclick = closeModal;
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    },
+  });
+}
+$("#btnDuplicate").onclick = duplicateDocument;
+
+/* ---- Notifications : mentions « @identifiant » et réponses ---- */
+let notifList = [];
+async function loadNotifications() {
+  try {
+    const d = await api("GET", "/api/notifications");
+    notifList = d.notifications;
+    const b = $("#notifBadge");
+    b.textContent = d.unread > 99 ? "99+" : String(d.unread);
+    b.hidden = !d.unread;
+    $("#btnNotif").title = d.unread ? `Notifications : ${d.unread} non lue${d.unread > 1 ? "s" : ""}` : "Notifications : mentions et réponses";
+  } catch (_e) {}
+}
+function openNotifications() {
+  openModal({
+    title: "Notifications",
+    subtitle: "Quand quelqu'un te cite (@" + esc(me.username) + ") dans un commentaire ou répond à une discussion où tu participes.",
+    body: `<div class="notif-list">${notifList.length ? notifList.map((n) => `
+      <button class="notif${n.read ? "" : " unread"}" data-id="${esc(n.id)}" data-p="${esc(n.path)}" data-cid="${esc(n.cid || "")}">
+        ${svg(n.kind === "mention" ? "comment" : "history")}
+        <span><b>${esc(n.by)}</b> ${n.kind === "mention" ? "t'a cité" : "a répondu"} dans <b>${esc(displayName(n.path))}</b>
+          <small>« ${esc(n.text)} » · ${esc(relTime(n.at))}</small></span></button>`).join("")
+      : '<p class="muted-sm">Aucune notification pour le moment.</p>'}</div>`,
+    foot: `${notifList.some((n) => !n.read) ? '<button class="btn left" data-act="all">Tout marquer comme lu</button>' : ""}<button class="btn" data-act="close">Fermer</button>`,
+    onMount(card) {
+      $('[data-act="close"]', card).onclick = closeModal;
+      const all = $('[data-act="all"]', card);
+      if (all) all.onclick = async () => { await api("POST", "/api/notifications/read", {}).catch(() => {}); closeModal(); loadNotifications(); };
+      for (const b of $$(".notif", card)) b.onclick = async () => {
+        closeModal();
+        api("POST", "/api/notifications/read", { ids: [b.dataset.id] }).then(loadNotifications).catch(() => {});
+        if (!files.includes(b.dataset.p)) { toast("Ce document n'existe plus.", { error: true }); return; }
+        openFile(b.dataset.p, { force: S && S.path === b.dataset.p, comment: b.dataset.cid || null });
+      };
+    },
+  });
+}
+$("#btnNotif").onclick = openNotifications;
+
+/* ---- Mentions dans les commentaires : « @ » propose les personnes ---- */
+function mentionify(html) {
+  return html.replace(/(^|[\s(>])@([a-z0-9][a-z0-9._-]{1,31})/gi, (m, pre, name) => {
+    const p = people.get("u:" + name.toLowerCase());
+    return p ? `${pre}<span class="mention" title="${esc(p.name)}">@${esc(name)}</span>` : m;
+  });
+}
+let mentionPop = null;
+function closeMentions() { if (mentionPop) { mentionPop.el.remove(); mentionPop = null; } }
+document.addEventListener("input", (e) => {
+  const ta = e.target;
+  if (!(ta instanceof HTMLTextAreaElement) || !ta.closest(".c-card")) return;
+  const before = ta.value.slice(0, ta.selectionStart);
+  const m = /(^|\s)@([a-z0-9._-]{0,31})$/i.exec(before);
+  if (!m) return closeMentions();
+  const q = foldName(m[2]);
+  const list = [...people.values()].filter((p) => p.username && (foldName(p.username).startsWith(q) || foldName(p.name).includes(q))).slice(0, 6);
+  if (!list.length) return closeMentions();
+  closeMentions();
+  const el = document.createElement("div");
+  el.className = "mention-pop";
+  el.setAttribute("role", "listbox");
+  el.innerHTML = list.map((p, i) => `<button role="option" data-u="${esc(p.username)}" class="${i === 0 ? "on" : ""}">${avatarHTML({ name: p.name, color: colorFor(p.username) })}<span>${esc(p.name)}</span><small>@${esc(p.username)}</small></button>`).join("");
+  document.body.appendChild(el);
+  const r = ta.getBoundingClientRect();
+  el.style.left = Math.min(r.left, innerWidth - el.offsetWidth - 8) + "px";
+  el.style.top = (r.bottom + 4 + el.offsetHeight > innerHeight ? r.top - el.offsetHeight - 4 : r.bottom + 4) + "px";
+  mentionPop = { el, ta, start: ta.selectionStart - m[2].length - 1 };
+  for (const b of $$("button", el)) {
+    b.onmousedown = (ev) => ev.preventDefault();
+    b.onclick = () => pickMention(b.dataset.u);
+  }
+});
+function pickMention(username) {
+  if (!mentionPop) return;
+  const { ta, start } = mentionPop;
+  const end = ta.selectionStart;
+  ta.value = ta.value.slice(0, start) + "@" + username + " " + ta.value.slice(end);
+  const caret = start + username.length + 2;
+  ta.setSelectionRange(caret, caret);
+  closeMentions();
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  ta.focus();
+}
+document.addEventListener("keydown", (e) => {
+  if (!mentionPop || e.target !== mentionPop.ta) return;
+  const items = $$("button", mentionPop.el), i = items.findIndex((b) => b.classList.contains("on"));
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); e.stopPropagation();
+    items[i].classList.remove("on");
+    items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].classList.add("on");
+  } else if (e.key === "Enter" || e.key === "Tab") {
+    e.preventDefault(); e.stopPropagation();
+    pickMention(items[Math.max(0, i)].dataset.u);
+  } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMentions(); }
+}, true);
+document.addEventListener("focusout", (e) => { if (mentionPop && e.target === mentionPop.ta) setTimeout(closeMentions, 150); });
+
 /* ---- Aide raccourcis ---- */
 function showShortcuts() {
   openModal({
@@ -1529,15 +2004,15 @@ function showShortcuts() {
       <tr><td>${svg("link")} ${kbd("Ctrl L")}</td><td>Copier le lien du document ouvert</td></tr>
       <tr><td>${svg("check")} ${kbd("Ctrl S")}</td><td>Enregistrer maintenant</td></tr>
       <tr><td>${svg("comment")} ${kbd("Ctrl Alt M")}</td><td>Commenter le passage sélectionné</td></tr>
-      <tr><td>${svg("pencil")} ${kbd("Ctrl Z")} / ${kbd("Ctrl Shift Z")}</td><td>Annuler / rétablir</td></tr>
+      <tr><td>${svg("pencil")} ${kbd("Ctrl Z")} / ${kbd("Ctrl Maj Z")}</td><td>Annuler / rétablir</td></tr>
       <tr><td>${kbd("Ctrl B")} / ${kbd("Ctrl I")} / ${kbd("Ctrl E")}</td><td>Gras / italique / code</td></tr>
-      <tr><td>${kbd("Ctrl Alt 1")} à ${kbd("3")}</td><td>Titre 1, 2, 3</td></tr>
+      <tr><td>${kbd("Ctrl Maj 1")} à ${kbd("3")}</td><td>Titre 1, 2, 3</td></tr>
       <tr><td>${kbd("Ctrl Maj 7")} / ${kbd("8")} / ${kbd("9")}</td><td>Liste numérotée / à puces / à cocher</td></tr>
-      <tr><td>${kbd("Ctrl")} + clic</td><td>Ouvrir un lien</td></tr>
+      <tr><td>${kbd("Ctrl")} + clic</td><td>Ouvrir un lien (sur écran tactile : toucher le lien, puis « Ouvrir »)</td></tr>
       <tr><td>${kbd("Échap")} puis ${kbd("Tab")}</td><td>Sortir de l'éditeur au clavier</td></tr>
       <tr><td>${kbd("F2")}</td><td>Renommer ou déplacer le document (ou la ligne choisie dans la liste)</td></tr>
       <tr><td>${kbd("↑")} ${kbd("↓")} ${kbd("←")} ${kbd("→")}</td><td>Parcourir la liste des documents (Entrée : ouvrir)</td></tr>
-      <tr><td>${kbd("Tab")} / ${kbd("Shift Tab")}</td><td>Indenter / dé-indenter</td></tr>
+      <tr><td>${kbd("Tab")} / ${kbd("Maj Tab")}</td><td>Indenter / dé-indenter</td></tr>
       <tr><td>${kbd("?")}</td><td>Cette aide</td></tr>
     </table>`,
     foot: '<button class="btn" data-act="close">Fermer</button>',
@@ -1554,15 +2029,19 @@ function goToLine(n) {
   ED.setSelection(pos, pos, "top"); ED.focus();
 }
 
+let restoringPath = null;
 async function confirmRestore(p, sha) {
   openModal({
     title: "Revenir à cette version ?",
     subtitle: `<strong>${esc(fileName(p))}</strong> : le contenu actuel sera remplacé par cette version plus ancienne. Un enregistrement de restauration est créé à la fin de l\'historique (tu pourras toujours revenir en arrière).`,
+    body: '<div class="msg"></div>',
     foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-danger" data-act="ok">Restaurer</button>',
     onMount(card) {
       $('[data-act="cancel"]', card).onclick = closeModal;
       $('[data-act="ok"]', card).onclick = async () => {
         const btn = $('[data-act="ok"]', card); btn.disabled = true; btn.textContent = "Restauration…";
+        restoringPath = p; // c'est moi qui restaure : pas d'annonce « par quelqu'un »
+        setTimeout(() => { if (restoringPath === p) restoringPath = null; }, 5000);
         try {
           const r = await api("POST", "/api/restore", { path: p, sha });
           closeModal();
@@ -1591,10 +2070,19 @@ function renderStatus() {
     if (!S.loaded) { text = "Chargement…"; tone = "busy"; }
     else if (S.offline) { text = S.dirty ? "Hors ligne · enregistrement…" : "Hors ligne · enregistré"; tone = "busy"; }
     else if (S.reconnecting || !S.connected) { text = "Reconnexion…"; tone = "busy"; }
-    else if (ED.readOnly) { text = "Lecture seule"; title = "Tu peux lire ce document mais pas le modifier."; }
+    else if (ED.readOnly) {
+      const c = canComment(S.path);
+      text = c ? "Lecture et commentaires" : "Lecture seule";
+      title = c ? "Tu peux lire et commenter ce document (sélectionne un passage), mais pas le modifier." : "Tu peux lire ce document mais pas le modifier.";
+    }
     else if (err) { text = "Échec de l'enregistrement"; tone = "err"; title = err; }
     else if (S.saving || S.dirty) { text = "Modifications en cours…"; tone = "busy"; }
     else { text = "Enregistré · " + relTime(S.savedSeen || Date.now()); tone = "ok"; }
+    if (S.loaded && S.words != null) {
+      const w = `${S.words.toLocaleString("fr-FR")} mot${S.words > 1 ? "s" : ""}`;
+      title = (title || text) + " · " + w;
+      text += " · " + w;
+    }
   }
   el.textContent = text;
   el.dataset.tone = tone;
@@ -1624,6 +2112,9 @@ function updateButtons() {
   $("#btnAccess").hidden = !(isAdmin() && p);
   $("#btnAuthors").hidden = !(S && S.loaded && !S.offline);
   $("#btnHistory").hidden = !p;
+  $("#btnExport").hidden = !p;
+  $("#btnDuplicate").hidden = !(S && S.loaded && isEditable(S.path));
+  updateFavButton();
   $("#btnCopyLink").hidden = !p;
   $("#btnComments").hidden = !(p && S && S.kind === "markdown");
   $("#btnToc").hidden = !(S && S.kind === "markdown");
@@ -1737,15 +2228,23 @@ function railHost() {
   if (!S || !S.loaded || S.kind !== "markdown" || S.offline || panelOpen()) return null;
   return paneEditor.clientWidth >= RAIL_MIN_PANE ? paneEditor : null;
 }
+/** Focus dans la marge des commentaires : retrouvé après qu'elle est redessinée (réponse, résolution…). */
 function captureFocus(box) {
   const el = document.activeElement;
-  if (!el || !box.contains(el) || !el.dataset.f) return null;
-  return { f: el.dataset.f, cid: el.closest(".c-card").dataset.cid, a: el.selectionStart, b: el.selectionEnd };
+  const card = el && box.contains(el) && el.closest(".c-card");
+  if (!card) return null;
+  return { f: el.dataset.f || null, c: el.dataset.c || null, cid: card.dataset.cid, idx: $$(".c-card", box).indexOf(card), a: el.selectionStart, b: el.selectionEnd };
 }
 function restoreFocus(box, k) {
   if (!k) return;
-  const el = box.querySelector(`.c-card[data-cid="${k.cid}"] [data-f="${k.f}"]`);
-  if (el) { el.focus(); try { el.setSelectionRange(k.a, k.b); } catch (_e) {} }
+  const card = box.querySelector(`.c-card[data-cid="${CSS.escape(k.cid)}"]`);
+  let el = card && k.f ? card.querySelector(`[data-f="${k.f}"]`) : null;
+  if (!el && card && k.c) el = card.querySelector(`[data-c="${k.c}"]`);
+  if (!el && card) el = card;
+  if (!el) { const cards = $$(".c-card", box); el = cards[Math.min(k.idx, cards.length - 1)] || null; } // fil résolu ou supprimé : le suivant
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  if (k.f) { try { el.setSelectionRange(k.a, k.b); } catch (_e) {} }
 }
 
 function itemHTML(c, it, isRoot, canW) {
@@ -1758,7 +2257,7 @@ function itemHTML(c, it, isRoot, canW) {
   const body = editingThis
     ? `<div class="c-form"><textarea class="input c-in" data-f="edit" rows="2">${esc(cEditing.text)}</textarea>
         <div class="c-btns"><button class="btn sm" data-c="cancel-edit">Annuler</button><button class="btn btn-primary sm" data-c="save-edit">Enregistrer</button></div></div>`
-    : `<div class="c-text">${linkify(esc(it.text))}</div>`;
+    : `<div class="c-text">${mentionify(linkify(esc(it.text)))}</div>`;
   const when = new Date(it.created).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" });
   return `<div class="c-item" data-rid="${isRoot ? "" : esc(it.id)}">
     <div class="c-head">${avatarHTML({ name: it.authorName || "?", color: it.color || "#888" })}
@@ -1766,7 +2265,7 @@ function itemHTML(c, it, isRoot, canW) {
       <div class="c-acts">${acts.join("")}</div></div>${body}</div>`;
 }
 function cardHTML(c, inPanel) {
-  const canW = canWrite(commentsPath);
+  const canW = canComment(commentsPath);
   const active = c.id === activeCid;
   const reps = c.replies || [];
   const showAll = active || inPanel;
@@ -1786,7 +2285,7 @@ function cardHTML(c, inPanel) {
   }
   const cls = ["c-card", active ? "active" : "", c.resolved ? "resolved" : "", inPanel ? "in-panel" : ""].filter(Boolean).join(" ");
   const label = `Commentaire de ${c.authorName || "?"}${reps.length ? `, ${reps.length} réponse${reps.length > 1 ? "s" : ""}` : ""}${c.resolved ? ", résolu" : ""}`;
-  return `<div class="${cls}" data-cid="${esc(c.id)}" style="--cc:${esc(c.color || "#888")}" tabindex="0" role="article" aria-label="${esc(label)}">${html}</div>`;
+  return `<div class="${cls}" data-cid="${esc(c.id)}" style="--cc:${safeColor(c.color)}" tabindex="0" role="article" aria-label="${esc(label)}">${html}</div>`;
 }
 function draftHTML(inPanel) {
   return `<div class="c-card draft active${inPanel ? " in-panel" : ""}" data-cid="draft" style="--cc:${esc(me.color)}">
@@ -1848,7 +2347,7 @@ function layoutRail() {
 /* ---- Bouton « + » à côté de la sélection ---- */
 function placeAddButton() {
   const sel = ED.selection;
-  const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && !ED.readOnly && ED.hasFocus
+  const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && canComment(S.path) && ED.hasFocus
     && !sel.empty && ED.slice(sel.from, sel.to).trim();
   if (!ok) { addBtn.hidden = true; return; }
   if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
@@ -1861,7 +2360,7 @@ addBtn.addEventListener("click", () => startDraft());
 
 /* ---- Actions ---- */
 function startDraft() {
-  if (!S || !S.loaded || S.kind !== "markdown" || ED.readOnly || S.offline) return;
+  if (!S || !S.loaded || S.kind !== "markdown" || !canComment(S.path) || S.offline) return;
   let { from: s, to: e } = ED.selection;
   const v = docText();
   if (e <= s) { // pas de sélection : toute la ligne du curseur
@@ -2033,6 +2532,16 @@ async function loadComments() {
   if (cEditing && !list.some((c) => c.id === cEditing.id)) cEditing = null;
   for (const id of [...replyDrafts.keys()]) if (!list.some((c) => c.id === id)) replyDrafts.delete(id);
   renderRail();
+  // ouvert depuis une notification : la discussion est affichée
+  if (S.wantComment) {
+    const id = S.wantComment, c = list.find((x) => x.id === id);
+    S.wantComment = null;
+    if (c) {
+      if (c.resolved) { panelTab = "done"; openComments(); }
+      else if (!railHost() && !panelOpen()) openComments();
+      activateComment(id, { scroll: true });
+    }
+  }
 }
 function resetComments() {
   commentsSeq++;
@@ -2061,7 +2570,7 @@ function renderCommentsPanel() {
   html += list.map((c) => cardHTML(c, true)).join("");
   if (!html) {
     html = panelTab === "open"
-      ? `<p class="muted-sm">Aucun commentaire ouvert.${canWrite(currentPath()) ? ` Sélectionne un passage du texte puis clique sur le bouton <b>+</b> qui apparaît à droite (ou ${kbd("Ctrl Alt M")}).` : ""}</p>`
+      ? `<p class="muted-sm">Aucun commentaire ouvert.${canComment(currentPath()) ? ` Sélectionne un passage du texte puis clique sur le bouton <b>+</b> qui apparaît à droite (ou ${kbd("Ctrl Alt M")}).` : ""}</p>`
       : `<p class="muted-sm">Aucune discussion résolue.</p>`;
   }
   wrap.innerHTML = html;
@@ -2100,7 +2609,10 @@ function newDocument() {
   openModal({
     title: "Nouveau document",
     subtitle: "Utilise « / » pour ranger dans un dossier. L'extension .md est ajoutée automatiquement (ou termine par .txt pour un texte brut).",
-    body: `<div class="field"><label for="fPath">Nom</label><input class="input" id="fPath" placeholder="notes/compte-rendu" value="${esc(folder ? folder + "/" : "")}" /></div><div class="msg"></div>`,
+    body: `<div class="field"><label for="fPath">Nom</label><input class="input" id="fPath" placeholder="notes/compte-rendu" value="${esc(folder ? folder + "/" : "")}" /></div>
+      <fieldset class="tpl-list"><legend>Modèle</legend>${Object.entries(TEMPLATES).map(([k, t], i) => `
+        <label class="tpl"><input type="radio" name="tpl" value="${k}"${i === 0 ? " checked" : ""}><span><b>${esc(t.label)}</b><small>${esc(t.hint)}</small></span></label>`).join("")}</fieldset>
+      <div class="msg"></div>`,
     foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Créer</button>',
     onMount(card) {
       const input = $("#fPath", card);
@@ -2110,10 +2622,11 @@ function newDocument() {
         if (!v) return input.focus();
         $('[data-act="ok"]', card).disabled = true;
         try {
-          const d = await api("POST", "/api/create", { path: v });
+          const tpl = TEMPLATES[($('input[name="tpl"]:checked', card) || {}).value];
+          const d = await api("POST", "/api/create", { path: v, ...(tpl && tpl.text && !/\.txt$/i.test(v) ? { content: tpl.text } : {}) });
           closeModal();
           await refreshTree();
-          openFile(d.path);
+          openFile(d.path, { focus: true }); // le curseur va directement dans le nouveau document
         } catch (e) { setMsg(card, e.message, "err"); $('[data-act="ok"]', card).disabled = false; }
       };
       $('[data-act="ok"]', card).onclick = go;
@@ -2186,7 +2699,7 @@ function confirmDisconnect(s) {
 /* ============================================================================================
  * Administration : utilisateurs, droits d'accès, dépôt
  * ========================================================================================== */
-const LEVEL_LBL = { none: "Masqué", read: "Lecture seule", write: "Lecture et modification" };
+const LEVEL_LBL = { none: "Masqué", read: "Lecture seule", comment: "Lecture et commentaires", write: "Lecture et modification" };
 const ROLE_LBL = { admin: "Administrateur", member: "Membre" };
 
 async function loadRules() {
@@ -2583,6 +3096,7 @@ async function renderUpdateTab(box, opts = {}) {
     <div class="row-between"><p class="muted-sm">Version installée : <strong>${esc(d.currentVersion)}</strong>${c.local ? ` (${esc(c.local)})` : ""}${d.last && d.last.ok ? ` · mise à jour depuis la ${esc(d.last.fromVersion)} le ${esc(when(d.last.at))}` : ""}</p>
       <button class="btn" data-act="check" ${job && job.running ? "disabled" : ""}>${svg("refresh")}Vérifier</button></div>
     ${!av.ok ? `<div class="note">${esc(av.reasons[0])}</div>` : ""}
+    ${d.last && !d.last.ok && !d.last.pending && d.last.error ? `<div class="msg err">${esc(d.last.error)} (${esc(when(d.last.at))})</div>` : ""}
     ${main}
     <div class="msg"></div>
     ${c.available && !c.blocked && !(job && job.running) && av.ok ? `<div class="row-end"><button class="btn btn-primary" data-act="update">${svg("download")}Mettre à jour maintenant</button></div>` : ""}`;
@@ -2766,7 +3280,7 @@ $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
 /* ---- Menu « ⋯ » : actions secondaires de la barre d'outils quand la place manque ---- */
 const MORE_LABELS = {
   btnCopyLink: "Copier le lien", btnToc: "Plan du document", btnAuthors: "Qui a écrit quoi",
-  btnHistory: "Historique", btnMove: "Renommer / déplacer", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
+  btnHistory: "Historique", btnExport: "Exporter / imprimer", btnDuplicate: "Dupliquer", btnMove: "Renommer / déplacer", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
 };
 let moreMenu = null;
 function closeMoreMenu() {
@@ -2822,7 +3336,11 @@ $("#skipToDoc").addEventListener("click", (e) => {
   if (S && S.loaded) ED.focus(); else { const r = $("#tree .node"); if (r) r.focus(); }
 });
 $("#search").addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") { const r = $('#tree .node[tabindex="0"]') || $("#tree .node"); if (r) { e.preventDefault(); r.focus(); } }
+  if (e.key === "ArrowDown") {
+    // d'abord les résultats dans le contenu, puis la liste des documents
+    const r = (!srBox.hidden && $(".sr", srBox)) || $('#tree .node[tabindex="0"]') || $("#tree .node");
+    if (r) { e.preventDefault(); r.focus(); }
+  }
   if (e.key === "Enter") { const first = $("#tree .node.file"); if (first) first.click(); }
   if (e.key === "Escape") { e.target.value = ""; renderTree(); e.target.blur(); }
 });
@@ -2838,6 +3356,13 @@ window.addEventListener("keydown", (e) => {
     && !(e.target.closest && e.target.closest("input, textarea, select, .modal"))) { e.preventDefault(); ED.openSearch(); }
   const typing = e.target.closest && e.target.closest("input, textarea, select, [contenteditable]");
   if (e.key === "?" && !typing) { e.preventDefault(); showShortcuts(); }
+});
+// Fermer l'onglet alors que des modifications ne sont pas arrivées au serveur : le navigateur demande confirmation
+window.addEventListener("beforeunload", (e) => {
+  const s = S;
+  if (!s || !s.loaded || ED.readOnly) return;
+  const unsent = s.offline ? s.dirty || s.saving : (s.reconnecting || !s.connected) && ED.text !== (s.reconnectBase ?? s.confirmedText);
+  if (unsent) { e.preventDefault(); e.returnValue = ""; }
 });
 window.addEventListener("hashchange", () => {
   const p = pathFromHash();
@@ -2870,7 +3395,10 @@ function pathFromHash() {
   checkUpdateBadge();
   await refreshTree();
   const wanted = pathFromHash();
-  const target = (wanted && files.includes(wanted) && wanted) || (files.includes("README.md") && "README.md") || files.find(isEditable) || files[0];
+  // sans document demandé : la page d'accueil (favoris, récents) ; à la toute première visite, le README
+  const firstVisit = !loadList("recent").length && !loadList("fav").length;
+  const target = (wanted && files.includes(wanted) && wanted) || (firstVisit && files.includes("README.md") && "README.md");
   if (target) openFile(target); else showEmpty();
+  loadNotifications();
   updateButtons();
 })();

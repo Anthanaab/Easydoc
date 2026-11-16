@@ -103,9 +103,10 @@ class CommentStore {
   saveSoon() { if (!this.saveTimer) this.saveTimer = setTimeout(() => { try { this._save(); } catch (e) { console.error("[commentaires]", e.message); } }, 2000); }
   flush() { if (this.saveTimer) this._save(); }
 
-  _list(p) { return this.map[p] || null; }
+  // propriétés propres seulement : un identifiant « __proto__ » ou « constructor » ne doit rien atteindre
+  _list(p) { return Object.hasOwn(this.map, p) ? this.map[p] : null; }
   has(p) { const l = this._list(p); return !!(l && Object.keys(l).length); }
-  get(p, id) { const l = this._list(p); return (l && l[id]) || null; }
+  get(p, id) { const l = this._list(p); return l && Object.hasOwn(l, String(id)) ? l[id] : null; }
   all(p) { return Object.values(this._list(p) || {}).sort((a, b) => a.created - b.created); }
 
   add(p, { author, authorName, color, text, start, end, quote, prefix, suffix }) {
