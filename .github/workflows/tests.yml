@@ -1,0 +1,54 @@
+# Tests automatiques d'Easydoc : à chaque envoi et à chaque demande de fusion.
+# Linux (comme les installations Proxmox et Docker) avec Node 22 (version minimale) et 24,
+# et Windows (disque insensible à la casse, liens, fins de ligne CRLF).
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, node: 22 }
+          - { os: ubuntu-latest, node: 24 }
+          - { os: windows-latest, node: 22 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Dépendances
+        run: npm ci --no-audit --no-fund
+
+      - name: Tests
+        run: npm test
+
+      # Le fichier construit est versionné (les serveurs ne le reconstruisent pas) : il doit
+      # correspondre exactement aux sources de client/. Sinon : « npm run build » a été oublié.
+      - name: Bibliothèques navigateur à jour
+        if: runner.os == 'Linux'
+        run: |
+          npm run build
+          git diff --exit-code --stat -- public/vendor/libs.js || {
+            echo "::error::public/vendor/libs.js ne correspond pas aux sources : lance « npm run build » et versionne le résultat."
+            exit 1
+          }

@@ -1,5 +1,7 @@
 # Easydoc
 
+[![Tests](https://github.com/Anthanaab/Easydoc/actions/workflows/tests.yml/badge.svg)](https://github.com/Anthanaab/Easydoc/actions/workflows/tests.yml)
+
 Éditeur Markdown **collaboratif en temps réel**, auto-hébergé, dont les documents sont les
 fichiers d'un **dépôt GitHub** (ou d'un dépôt git local).
 
@@ -295,4 +297,6 @@ compte administrateur et un compte membre.
   enregistrement hors ligne et conflit, restauration
 - `test/helpers.js` — serveur de test, sessions, connexions temps réel, commits « externes »
 
-À lancer avant chaque version ; un nouveau bug corrigé mérite son test.
+À lancer avant chaque version ; un nouveau bug corrigé mérite son test. Sur GitHub, ils tournent
+automatiquement à chaque envoi et à chaque demande de fusion (`.github/workflows/tests.yml` : Linux
+avec Node 22 et 24, Windows), qui vérifient aussi que `public/vendor/libs.js` a bien été reconstruit.
