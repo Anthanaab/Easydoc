@@ -1044,41 +1044,61 @@ app.get("/api/people", (_req, res) => {
 });
 
 // Recherche dans le contenu des documents (respecte les droits : les fichiers masqués sont ignorés).
+// ---- Recherche dans le contenu ------------------------------------------------------------------
+// Le texte des documents est gardé en mémoire avec l'empreinte (sha) de sa version : avec GitHub,
+// seuls les fichiers modifiés depuis la recherche précédente sont relus (quota d'API préservé).
+const searchCache = new Map(); // chemin → { sha, content }
+async function searchText(f) {
+  const live = yws.docs.get(f.path);
+  if (live && live.getMap("meta").get("loaded")) return live.getText(TEXT).toString();
+  const c = searchCache.get(f.path);
+  if (c && f.sha && c.sha === f.sha) return c.content;
+  const r = await repo.readFile(f.path);
+  if (!r) return null;
+  if (f.sha) searchCache.set(f.path, { sha: f.sha, content: r.content });
+  return r.content;
+}
+
 app.get("/api/search", async (req, res) => {
   const q = String(req.query.q || "").trim().slice(0, 120);
   if (!q) return res.json({ ok: true, results: [] });
   try {
-    const all = await repo.listFiles();
+    const all = (await repo.listFiles()).filter((f) => isEditable(f.path) && access.can(req.user, f.path, "read")).slice(0, 200);
+    for (const k of searchCache.keys()) if (!all.some((f) => f.path === k)) searchCache.delete(k);
+    // lecture en parallèle (6 à la fois) des documents pas encore en mémoire
+    const texts = new Map();
+    let next = 0;
+    await Promise.all(Array.from({ length: 6 }, async () => {
+      while (next < all.length) {
+        const f = all[next++];
+        try { texts.set(f.path, await searchText(f)); } catch (_e) {}
+      }
+    }));
     const out = [];
-    let scanned = 0;
+    const needle = q.toLowerCase();
     for (const f of all) {
-      if (!isEditable(f.path) || !access.can(req.user, f.path, "read")) continue;
-      if (++scanned > 200) break;
-      try {
-        const r = await repo.readFile(f.path);
-        if (!r) continue;
-        const text = r.content;
-        const lower = text.toLowerCase(), needle = q.toLowerCase();
-        let from = 0;
-        for (let k = 0; k < 25; k++) {
-          const idx = lower.indexOf(needle, from);
-          if (idx < 0) break;
-          // extrait la ligne entière autour du match
-          let ls = text.lastIndexOf("\n", idx - 1) + 1;
-          let le = text.indexOf("\n", idx);
-          if (le < 0) le = text.length;
-          const line = text.slice(ls, le);
-          const lineNo = text.slice(0, ls).split("\n").length;
-          const at = idx - ls;              // position du match dans la ligne
-          const start = Math.max(0, at - 25), end = Math.min(line.length, at + q.length + 40);
-          const clean = (str) => str.replace(/\*\*|__|`/g, ""); // enlève les balises markdown du raccourci
-          const s1 = (start > 0 ? "…" : "") + clean(line.slice(start, at));
-          const s2 = clean(line.slice(at, at + q.length));
-          const s3 = clean(line.slice(at + q.length, end));
-          out.push({ path: f.path, line: lineNo, snippet: s1 + s2 + s3 + (end < line.length ? "…" : "") });
-          from = idx + Math.max(needle.length, 1);
-        }
-      } catch (_e) {}
+      const text = texts.get(f.path);
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      let from = 0;
+      for (let k = 0; k < 25; k++) {
+        const idx = lower.indexOf(needle, from);
+        if (idx < 0) break;
+        // extrait la ligne entière autour du match
+        const ls = text.lastIndexOf("\n", idx - 1) + 1;
+        let le = text.indexOf("\n", idx);
+        if (le < 0) le = text.length;
+        const line = text.slice(ls, le);
+        const lineNo = text.slice(0, ls).split("\n").length;
+        const at = idx - ls;              // position du match dans la ligne
+        const start = Math.max(0, at - 25), end = Math.min(line.length, at + q.length + 40);
+        const clean = (str) => str.replace(/\*\*|__|`/g, ""); // enlève les balises markdown du raccourci
+        const s1 = (start > 0 ? "…" : "") + clean(line.slice(start, at));
+        const s2 = clean(line.slice(at, at + q.length));
+        const s3 = clean(line.slice(at + q.length, end));
+        out.push({ path: f.path, line: lineNo, snippet: s1 + s2 + s3 + (end < line.length ? "…" : "") });
+        from = idx + Math.max(needle.length, 1);
+      }
       if (out.length >= 30) break;
     }
     res.json({ ok: true, results: out });

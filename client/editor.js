@@ -401,6 +401,9 @@ export function createEditor(parent, hooks) {
       view.setState(EditorState.create({ doc: opts.text || "", extensions: extensions(opts) }));
     },
     get text() { return view.state.doc.toString(); },
+    /** Longueur du texte et extrait, sans recopier tout le document (appelés souvent). */
+    get length() { return view.state.doc.length; },
+    slice(from, to) { return view.state.sliceDoc(from, to); },
     /**
      * Remplace le texte par des modifications minimales (reprise après coupure, mode hors ligne) :
      * le texte inchangé garde ses auteurs, même entre deux passages modifiés.

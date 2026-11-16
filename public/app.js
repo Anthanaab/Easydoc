@@ -315,7 +315,14 @@ function connectSystem() {
     if (cfg !== undefined && cfg !== seenVersions.config) { toast("Le dépôt connecté a changé — rechargement…"); setTimeout(() => location.reload(), 800); return; }
     if (tree !== seenVersions.tree) { seenVersions.tree = tree; refreshTree(); if (isAdmin()) loadRules(); }
   });
-  sys.awareness.on("change", () => { renderPresence(); renderTree(); });
+  // la liste des fichiers n'est redessinée que si quelqu'un change de document (pas à chaque
+  // mouvement de curseur des autres, qui ne change que le numéro de ligne affiché en info-bulle)
+  let presenceSig = "";
+  sys.awareness.on("change", () => {
+    renderPresence();
+    const sig = [...othersByPath()].map(([p, l]) => p + ":" + l.map((u) => u.name + u.color).join(",")).sort().join("|");
+    if (sig !== presenceSig) { presenceSig = sig; renderTree(); }
+  });
 }
 const setPresence = (k, v) => { if (sys) sys.awareness.setLocalStateField(k, v); };
 /** Empreinte d'un chemin : la présence ne révèle pas aux autres le nom des fichiers qu'ils ne voient pas. */
@@ -1036,7 +1043,7 @@ function renderOverlay() { cancelAnimationFrame(ovRaf); ovRaf = requestAnimation
 function drawOverlay() {
   const live = S && S.loaded && !S.offline && !S.reconnecting;
   authorRuns = null;
-  if (live && showAuthors && ED.text === S.ytext.toString()) {
+  if (live && showAuthors && ED.length === S.ytext.length) {
     const runs = [];
     let i = 0;
     for (const op of S.ytext.toDelta()) {
@@ -1060,7 +1067,7 @@ function editorMarks(from, to) {
       out.push({ from: s, to: e, cls: "au", attrs: { style: `--c:${personOf(a).color}`, "data-a": a, "data-t": String(t) } });
     }
   }
-  for (const a of commentAnchors(ED.text.length)) {
+  for (const a of commentAnchors(ED.length)) {
     if (a.e <= from || a.s >= to) continue;
     out.push({ from: a.s, to: a.e, cls: a.on ? "ca on" : "ca", attrs: { style: `--ca:${a.color}`, "data-cids": a.id } });
   }
@@ -1644,7 +1651,7 @@ function layoutRail() {
 function placeAddButton() {
   const sel = ED.selection;
   const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && !ED.readOnly && ED.hasFocus
-    && !sel.empty && docText().slice(sel.from, sel.to).trim();
+    && !sel.empty && ED.slice(sel.from, sel.to).trim();
   if (!ok) { addBtn.hidden = true; return; }
   if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
   addBtn.style.top = ED.topAt(sel.from) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop - 6 + "px";

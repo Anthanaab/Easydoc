@@ -123,7 +123,7 @@ class RepoService {
         });
         return (data.tree || [])
           .filter((t) => t.type === "blob" && !isHidden(t.path))
-          .map((t) => ({ path: t.path, size: t.size || 0 }));
+          .map((t) => ({ path: t.path, size: t.size || 0, sha: t.sha })); // sha : contenu inchangé = même sha
       } catch (e) {
         if (e.status === 404 || e.status === 409) return []; // dépôt vide / branche absente
         throw e;
