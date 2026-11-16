@@ -243,3 +243,22 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, CodeMirror,
   DOMPurify) et l'éditeur, regroupés en un fichier servi localement. **Après toute
   modification de `client/` : `npm run build`** (le fichier construit est versionné).
+
+### Tests
+
+```bash
+npm test
+```
+
+Une vingtaine de tests (environ 15 s, `git` requis), sans toucher aux données réelles : chaque
+fichier démarre son propre serveur Easydoc dans un dossier temporaire, sur un port libre, avec un
+compte administrateur et un compte membre.
+
+- `test/unitaires.test.js` — ancrage des commentaires, fusion à trois voies, validation des chemins
+- `test/securite.test.js` — droits d'accès (y compris les variantes de nom), fichiers importés,
+  liens symboliques, origine des requêtes, déconnexion, CSP
+- `test/pertes.test.js` — modification externe pendant la frappe, échec d'enregistrement (secours),
+  enregistrement hors ligne et conflit, restauration
+- `test/helpers.js` — serveur de test, sessions, connexions temps réel, commits « externes »
+
+À lancer avant chaque version ; un nouveau bug corrigé mérite son test.
