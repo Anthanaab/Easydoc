@@ -42,7 +42,10 @@ en train d'être tapé.
   Markdown (`**`, `#`, `[…](…)`) ne réapparaissent que sur la ligne où se trouve le curseur. Barre de
   mise en forme (gras, titres, listes, lien…) et raccourcis : `Ctrl+B`, `Ctrl+I`, `Ctrl+Alt+1/2/3`,
   `Ctrl+Maj+7/8/9`, `Ctrl+E`. `Entrée` continue une liste. Les fichiers restent du Markdown standard.
-- Sommaire flottant (titres du document), liens entre documents (`Ctrl+clic`), thème clair ou sombre.
+- **Plan du document** à gauche du texte, ouvert par défaut quand la place le permet : les titres
+  du document, le titre de la partie affichée mis en évidence, un clic pour y aller. Sur un écran
+  plus étroit, le bouton *Plan* l'ouvre par-dessus le texte.
+- Liens entre documents (`Ctrl+clic`), thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
 - **Images dans le texte** : colle une capture d'écran (`Ctrl+V`) ou glisse une image sur le document :
   elle est enregistrée dans le dossier « *nom du document* - images » et s'affiche à cet endroit.

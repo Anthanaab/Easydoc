@@ -47,6 +47,21 @@ test("comparaison de textes : limitée dans le temps sur deux très longs textes
   assert.equal(out, b);
 });
 
+test("feuille de style : pas de sélecteur orphelin ni d'accolade manquante", () => {
+  // un sélecteur laissé seul sur sa ligne avale la règle suivante (bug de la 0.12.0 : .area n'était plus en flex)
+  const lines = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "style.css"), "utf8").split("\n");
+  let depth = 0, inComment = false;
+  lines.forEach((l, i) => {
+    const t = l.trim();
+    if (t.startsWith("/*")) inComment = !t.includes("*/");
+    else if (inComment) { if (t.includes("*/")) inComment = false; }
+    else if (depth === 0 && t && !/[{};,]$/.test(t) && !t.includes("{")) assert.fail(`ligne ${i + 1} : sélecteur sans règle « ${t} »`);
+    depth += (l.match(/\{/g) || []).length - (l.match(/\}/g) || []).length;
+    assert.ok(depth >= 0, `ligne ${i + 1} : accolade fermante en trop`);
+  });
+  assert.equal(depth, 0, "accolade ouvrante non refermée");
+});
+
 test("chemins : noms dangereux refusés, noms ordinaires acceptés", () => {
   for (const bad of ["../x.md", "a/../../x.md", "C:/Windows/win.ini", ".git/config", "a/.env", "Interne./a.md", "Interne /a.md", "INTERN~1/a.md", "-A", "notes/-x.md", "a\0b.md"]) {
     assert.equal(safeFilePath(bad), null, bad);

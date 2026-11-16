@@ -193,28 +193,60 @@ function applyTheme(t) {
  * ========================================================================================== */
 let modalClose = null;
 function openModal({ title, subtitle = "", body = "", foot = "", locked = false, wide = false, onMount }) {
-  closeModal();
+  const opener = modalClose ? modalOpener : document.activeElement; // fenêtre remplacée : on garde l'élément d'origine
+  closeModal(true);
+  modalOpener = opener;
   const m = $("#modal"), card = $("#modalCard");
   card.classList.toggle("wide", wide);
-  card.innerHTML = `<div class="m-head"><h3>${esc(title)}</h3>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
+  card.innerHTML = `<div class="m-head"><h3 id="modalTitle">${esc(title)}</h3>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
     <div class="m-body">${body}</div>${foot ? `<div class="m-foot">${foot}</div>` : ""}`;
+  m.setAttribute("aria-labelledby", "modalTitle");
   hydrateIcons(card);
   m.classList.remove("hidden");
-  const onKey = (e) => { if (e.key === "Escape" && !locked) closeModal(); };
+  const focusables = () => $$('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])', card)
+    .filter((el) => el.offsetParent !== null);
+  const onKey = (e) => {
+    if (e.key === "Escape" && !locked) { e.stopPropagation(); closeModal(); return; }
+    // Tab reste dans la fenêtre (on ne tombe pas sur la page derrière)
+    if (e.key === "Tab") {
+      const list = focusables();
+      if (!list.length) { e.preventDefault(); return; }
+      const i = list.indexOf(document.activeElement);
+      if (e.shiftKey && (i <= 0)) { e.preventDefault(); list[list.length - 1].focus(); }
+      else if (!e.shiftKey && (i === -1 || i === list.length - 1)) { e.preventDefault(); list[0].focus(); }
+    }
+  };
   const onBg = (e) => { if (e.target === m && !locked) closeModal(); };
-  document.addEventListener("keydown", onKey);
+  document.addEventListener("keydown", onKey, true);
   m.addEventListener("mousedown", onBg);
   modalClose = () => {
-    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("keydown", onKey, true);
     m.removeEventListener("mousedown", onBg);
     m.classList.add("hidden");
+    m.removeAttribute("aria-labelledby");
     card.innerHTML = "";
   };
   if (onMount) onMount(card);
-  const first = card.querySelector("input");
-  if (first) setTimeout(() => first.focus(), 30);
+  // focus de départ : le premier champ, sinon le bouton principal, sinon le premier bouton
+  setTimeout(() => {
+    if (!card.contains(document.activeElement)) {
+      const first = $("input:not([disabled]), textarea:not([disabled]), select:not([disabled])", card)
+        || $(".m-foot .btn-primary:not([disabled]), .m-foot .btn-danger:not([disabled])", card) || focusables()[0];
+      if (first) first.focus();
+    }
+  }, 30);
 }
-function closeModal() { if (modalClose) { const f = modalClose; modalClose = null; f(); } }
+let modalOpener = null;
+/** Ferme la fenêtre ; le focus revient à l'élément qui l'avait ouverte (sauf si une autre la remplace). */
+function closeModal(replacing) {
+  replacing = replacing === true; // souvent branchée en gestionnaire de clic : l'argument est alors l'événement
+  if (!modalClose) return;
+  const f = modalClose;
+  modalClose = null;
+  f();
+  if (!replacing && modalOpener && modalOpener.isConnected && modalOpener.focus) modalOpener.focus();
+  if (!replacing) modalOpener = null;
+}
 function setMsg(card, text, kind = "info") { const m = $(".msg", card); m.className = `msg ${kind}`; m.textContent = text; }
 
 /** Premier démarrage (création de l'administrateur) ou connexion. */
@@ -386,57 +418,115 @@ function buildTree(paths) {
   return root;
 }
 
-function fileNode(p, others, showDir) {
+function fileNode(p, others, showDir, level = 1) {
   const el = document.createElement("div");
-  el.className = "node file" + (currentPath() === p ? " active" : "");
+  const active = currentPath() === p;
+  el.className = "node file" + (active ? " active" : "");
   el.title = p;
   el.dataset.path = p;
-  const dots = (others.get(hashPath(p)) || []).slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
+  el.setAttribute("role", "treeitem");
+  el.setAttribute("aria-level", String(level));
+  el.tabIndex = -1;
+  if (active) el.setAttribute("aria-current", "page");
+  const people = others.get(hashPath(p)) || [];
+  const dots = people.slice(0, 3).map((u) => `<i style="background:${esc(u.color)}" title="${esc(u.name)}"></i>`).join("");
   const where = showDir && dirName(p) ? ` <span class="ext">· ${esc(dirName(p))}</span>` : "";
+  const ro = !isAdmin() && (fileInfo.get(p) || {}).access === "read";
   const mark = isAdmin() && adminRules[p] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>`
-    : !isAdmin() && (fileInfo.get(p) || {}).access === "read" ? `<span class="lockmark" title="Lecture seule">${svg("eye")}</span>` : "";
+    : ro ? `<span class="lockmark" title="Lecture seule">${svg("eye")}</span>` : "";
   el.innerHTML = `${iconFor(p)}<span class="name">${esc(displayName(p))}${where}</span>${mark}<span class="dots">${dots}</span>`;
+  // nom lu par un lecteur d'écran : le document, son dossier, la lecture seule et qui l'a ouvert
+  el.setAttribute("aria-label", [displayName(p), showDir && dirName(p) ? `dans ${dirName(p)}` : "", ro ? "lecture seule" : "",
+    people.length ? `ouvert par ${people.map((u) => u.name).join(", ")}` : ""].filter(Boolean).join(", "));
   el.onclick = () => { openFile(p); $("#app").classList.remove("nav-open"); };
   return el;
 }
 
+function toggleFolder(path) {
+  if (closed.has(path)) closed.delete(path); else closed.add(path);
+  localStorage.setItem("ed-closed", JSON.stringify([...closed]));
+  renderTree();
+}
+
 function renderTree() {
   const tree = $("#tree");
+  // le focus clavier reste sur la même ligne quand la liste est redessinée
+  const had = tree.contains(document.activeElement) ? document.activeElement : null;
+  const keep = had && (had.dataset.path ? `[data-path="${CSS.escape(had.dataset.path)}"]` : had.dataset.dir ? `[data-dir="${CSS.escape(had.dataset.dir)}"]` : null);
   const q = norm($("#search").value.trim());
   const others = othersByPath();
   tree.innerHTML = "";
+  tree.setAttribute("role", "tree");
   if (!files.length) { tree.innerHTML = '<div class="tree-empty">Aucun fichier pour l\'instant.</div>'; return; }
   if (q) {
     const hits = files.filter((p) => norm(p).includes(q));
     if (!hits.length) tree.innerHTML = '<div class="tree-empty">Aucun résultat.</div>';
     for (const p of hits) tree.appendChild(fileNode(p, others, true));
-    return;
-  }
-  const draw = (node, parent) => {
-    for (const [name, d] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0], "fr"))) {
-      const open = !closed.has(d.path);
-      const row = document.createElement("div");
-      row.className = "node folder" + (open ? " open" : "");
-      row.dataset.dir = d.path;
-      const lock = isAdmin() && adminRules[d.path] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>` : "";
-      row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}<span class="name">${esc(name)}</span>${lock}`;
-      row.onclick = () => {
-        if (closed.has(d.path)) closed.delete(d.path); else closed.add(d.path);
-        localStorage.setItem("ed-closed", JSON.stringify([...closed]));
-        renderTree();
-      };
-      parent.appendChild(row);
-      if (open) {
-        const kids = document.createElement("div");
-        kids.className = "children";
-        draw(d, kids);
-        parent.appendChild(kids);
+  } else {
+    const draw = (node, parent, level) => {
+      for (const [name, d] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0], "fr"))) {
+        const open = !closed.has(d.path);
+        const row = document.createElement("div");
+        row.className = "node folder" + (open ? " open" : "");
+        row.dataset.dir = d.path;
+        row.setAttribute("role", "treeitem");
+        row.setAttribute("aria-level", String(level));
+        row.setAttribute("aria-expanded", String(open));
+        row.tabIndex = -1;
+        const lock = isAdmin() && adminRules[d.path] ? `<span class="lockmark" title="Droits d'accès particuliers">${svg("lock")}</span>` : "";
+        row.innerHTML = `<span class="chev">${svg("chevron")}</span>${svg("folder")}<span class="name">${esc(name)}</span>${lock}`;
+        row.onclick = () => toggleFolder(d.path);
+        parent.appendChild(row);
+        if (open) {
+          const kids = document.createElement("div");
+          kids.className = "children";
+          kids.setAttribute("role", "group");
+          draw(d, kids, level + 1);
+          parent.appendChild(kids);
+        }
       }
-    }
-    for (const p of node.files) parent.appendChild(fileNode(p, others, false));
-  };
-  draw(buildTree(files), tree);
+      for (const p of node.files) parent.appendChild(fileNode(p, others, false, level));
+    };
+    draw(buildTree(files), tree, 1);
+  }
+  // une seule ligne atteignable par Tab (le document ouvert, sinon la première) ; les flèches font le reste
+  const rows = $$(".node", tree);
+  const target = (keep && $(keep, tree)) || $(".node.active", tree) || rows[0];
+  if (target) target.tabIndex = 0;
+  if (had && target) target.focus();
 }
+
+/* ---- Liste des documents au clavier : flèches, Début/Fin, Entrée, comme un explorateur ---- */
+$("#tree").addEventListener("keydown", (e) => {
+  const row = e.target.closest && e.target.closest(".node");
+  if (!row) return;
+  const rows = $$(".node", $("#tree"));
+  const i = rows.indexOf(row);
+  const go = (r) => { if (!r) return; for (const x of rows) x.tabIndex = -1; r.tabIndex = 0; r.focus(); };
+  const folder = row.classList.contains("folder");
+  const open = folder && row.classList.contains("open");
+  const parentRow = () => {
+    const group = row.parentElement && row.parentElement.closest(".children");
+    return group ? group.previousElementSibling : null;
+  };
+  switch (e.key) {
+    case "ArrowDown": go(rows[i + 1]); break;
+    case "ArrowUp": go(rows[i - 1]); break;
+    case "Home": go(rows[0]); break;
+    case "End": go(rows[rows.length - 1]); break;
+    case "ArrowRight":
+      if (folder && !open) toggleFolder(row.dataset.dir);
+      else if (folder) go(rows[i + 1]);
+      break;
+    case "ArrowLeft":
+      if (folder && open) toggleFolder(row.dataset.dir);
+      else go(parentRow());
+      break;
+    case "Enter": case " ": row.click(); break;
+    default: return;
+  }
+  e.preventDefault();
+});
 
 /* ============================================================================================
  * Session d'édition (document Markdown / texte ouvert)
@@ -1269,9 +1359,14 @@ async function copyLink() {
 }
 $("#btnCopyLink").onclick = copyLink;
 
-/* ---- Sommaire flottant : les titres du document, pour s'y rendre d'un clic ---- */
-let tocBar = null;
+/* ---- Plan du document : colonne à gauche du texte, comme dans Google Docs ---- */
+// Ouvert par défaut quand la place le permet (choix mémorisé) ; sur un écran plus étroit il reste
+// replié et le bouton l'ouvre par-dessus le texte, le temps d'aller à un titre.
+const OUTLINE_MIN_MAIN = 1080; // largeur de la zone principale nécessaire pour plan + texte + marge des commentaires
+let outlinePref = localStorage.getItem("ed-outline") !== "0";
+let outlineOverlay = false;    // ouvert par-dessus le texte (écran étroit)
 let tocT = null;
+let tocHeadsSig = "";
 /** Titres Markdown (# à ####) hors blocs de code : [{ level, text, line }]. */
 function tocHeadings(md) {
   const out = [];
@@ -1291,44 +1386,87 @@ function tocHeadings(md) {
   }
   return out;
 }
+const outlineWide = () => $(".main").clientWidth >= OUTLINE_MIN_MAIN;
+const outlineShown = () => !!(S && S.loaded && S.kind === "markdown") && (outlineOverlay || (outlinePref && outlineWide()));
+
+/** Affiche ou masque le plan selon le document, la place et le choix de l'utilisateur ; met à jour les titres. */
 function renderTOC() {
-  if (!tocBar) return;
-  const heads = S && S.loaded && S.kind === "markdown" ? tocHeadings(ED.text) : [];
-  $(".toc-list", tocBar).innerHTML = heads.length
-    ? heads.map((h) => `<button data-line="${h.line}" class="h${h.level}-">${esc(h.text)}</button>`).join("")
-    : '<p class="toc-empty">Aucun titre dans ce document. Ajoute-en avec T1, T2, T3.</p>';
-  for (const b of $$(".toc-list button", tocBar)) b.onclick = () => goToLine(Number(b.dataset.line));
+  const box = $("#outline");
+  const show = outlineShown();
+  const wasShown = !box.hidden;
+  box.hidden = !show;
+  box.classList.toggle("overlay", show && outlineOverlay);
+  const btn = $("#btnToc");
+  btn.classList.toggle("on", show);
+  btn.setAttribute("aria-pressed", String(show));
+  btn.title = show ? "Masquer le plan du document" : "Afficher le plan du document";
+  if (!show) { tocHeadsSig = ""; if (wasShown && S && S.loaded) renderRail(); return; }
+  const heads = tocHeadings(ED.text);
+  const sig = JSON.stringify(heads);
+  if (sig !== tocHeadsSig) {
+    tocHeadsSig = sig;
+    $("#outlineList").innerHTML = heads.length
+      ? heads.map((h) => `<button class="h${h.level}" data-line="${h.line}" title="${esc(h.text)}">${esc(h.text)}</button>`).join("")
+      : '<p class="ol-empty">Les titres du document apparaîtront ici. Ajoutes-en avec T1, T2 ou T3.</p>';
+    for (const b of $$("#outlineList button")) {
+      b.onclick = () => {
+        goToLine(Number(b.dataset.line));
+        for (const x of $$("#outlineList button")) x.classList.toggle("on", x === b); // titre choisi mis en évidence tout de suite
+        if (outlineOverlay) { outlineOverlay = false; renderTOC(); }
+        setTimeout(updateTocCurrent, 120); // puis recalculé d'après la position réelle
+      };
+    }
+  }
+  if (!wasShown && S && S.loaded) renderRail(); // la largeur du texte a changé : marge des commentaires replacée
   updateTocCurrent();
 }
-/** Met en évidence le titre de la partie affichée. */
+/** Met en évidence le titre de la partie affichée (et le garde visible dans le plan). */
 function updateTocCurrent() {
-  if (!tocBar || !S || !S.loaded) return;
+  const box = $("#outline");
+  if (box.hidden || !S || !S.loaded) return;
   const limit = paneEditor.getBoundingClientRect().top + 90;
-  let cur = null;
-  for (const b of $$(".toc-list button", tocBar)) {
+  const btns = $$("#outlineList button");
+  let cur = btns[0] || null;
+  for (const b of btns) {
     if (ED.topAt(ED.lineStart(Number(b.dataset.line))) <= limit) cur = b; else break;
   }
-  for (const b of $$(".toc-list button", tocBar)) b.classList.toggle("on", b === (cur || $(".toc-list button", tocBar)));
+  for (const b of btns) {
+    const on = b === cur;
+    if (b.classList.contains("on") !== on) b.classList.toggle("on", on);
+    if (on) b.setAttribute("aria-current", "location"); else b.removeAttribute("aria-current");
+  }
+  if (cur) {
+    const list = $("#outlineList"), r = cur.getBoundingClientRect(), lr = list.getBoundingClientRect();
+    if (r.top < lr.top || r.bottom > lr.bottom) cur.scrollIntoView({ block: "nearest" });
+  }
 }
-function scheduleToc() { if (tocBar) { clearTimeout(tocT); tocT = setTimeout(renderTOC, 400); } }
-function openToc() {
-  if (tocBar || !S || S.kind !== "markdown") return;
-  tocBar = document.createElement("div");
-  tocBar.className = "toc";
-  tocBar.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" title="Fermer">${svg("x")}</button></h4><div class="toc-list"></div></div>`;
-  document.body.appendChild(tocBar);
-  $(".toc-close", tocBar).onclick = closeToc;
-  $("#btnToc").classList.add("on");
-  renderTOC();
-}
+function scheduleToc() { if (!$("#outline").hidden) { clearTimeout(tocT); tocT = setTimeout(renderTOC, 400); } }
+/** Document fermé : le plan se vide (il réapparaît à l'ouverture du suivant). */
 function closeToc() {
   clearTimeout(tocT);
-  if (tocBar) { tocBar.remove(); tocBar = null; }
-  $("#btnToc").classList.remove("on");
+  outlineOverlay = false;
+  tocHeadsSig = "";
+  $("#outlineList").innerHTML = "";
+  $("#outline").hidden = true;
 }
-$("#btnToc").onclick = () => (tocBar ? closeToc() : openToc());
+function toggleOutline() {
+  if (outlineWide()) {
+    outlinePref = !outlineShown();
+    outlineOverlay = false;
+    localStorage.setItem("ed-outline", outlinePref ? "1" : "0");
+  } else outlineOverlay = !outlineOverlay;
+  renderTOC();
+  if (!$("#outline").hidden && outlineOverlay) { const b = $("#outlineList .on") || $("#outlineList button"); if (b) b.focus(); }
+}
+$("#btnToc").onclick = toggleOutline;
+$("#btnOutlineClose").onclick = () => { if (outlineOverlay) { outlineOverlay = false; renderTOC(); } else toggleOutline(); ED.focus(); };
+$("#outline").addEventListener("keydown", (e) => { if (e.key === "Escape" && outlineOverlay) { outlineOverlay = false; renderTOC(); ED.focus(); } });
 let tocRaf = 0;
-paneEditor.addEventListener("scroll", () => { if (tocBar) { cancelAnimationFrame(tocRaf); tocRaf = requestAnimationFrame(updateTocCurrent); } }, { passive: true });
+paneEditor.addEventListener("scroll", () => { if (!$("#outline").hidden) { cancelAnimationFrame(tocRaf); tocRaf = requestAnimationFrame(updateTocCurrent); } }, { passive: true });
+// largeur de la fenêtre : le plan apparaît ou se replie selon la place
+let outlineResizeT = null;
+window.addEventListener("resize", () => { clearTimeout(outlineResizeT); outlineResizeT = setTimeout(() => { if (S && S.loaded) renderTOC(); }, 150); });
+
 
 /* ---- Aide raccourcis ---- */
 function showShortcuts() {
@@ -1344,6 +1482,8 @@ function showShortcuts() {
       <tr><td>${kbd("Ctrl Alt 1")} à ${kbd("3")}</td><td>Titre 1, 2, 3</td></tr>
       <tr><td>${kbd("Ctrl Maj 7")} / ${kbd("8")} / ${kbd("9")}</td><td>Liste numérotée / à puces / à cocher</td></tr>
       <tr><td>${kbd("Ctrl")} + clic</td><td>Ouvrir un lien</td></tr>
+      <tr><td>${kbd("Échap")} puis ${kbd("Tab")}</td><td>Sortir de l'éditeur au clavier</td></tr>
+      <tr><td>${kbd("↑")} ${kbd("↓")} ${kbd("←")} ${kbd("→")}</td><td>Parcourir la liste des documents (Entrée : ouvrir)</td></tr>
       <tr><td>${kbd("Tab")} / ${kbd("Shift Tab")}</td><td>Indenter / dé-indenter</td></tr>
       <tr><td>${kbd("?")}</td><td>Cette aide</td></tr>
     </table>`,
@@ -1354,10 +1494,11 @@ function showShortcuts() {
 function kbd(t) { return `<span class="kbd">${esc(t)}</span>`; }
 
 /* ---- Aller à une ligne dans le document ouvert ---- */
+/** Curseur au début de la ligne n, amenée en haut de l'écran (plan, résultats de recherche). */
 function goToLine(n) {
   if (!S || !S.loaded) return;
   const pos = ED.lineStart(n);
-  ED.setSelection(pos, pos); ED.focus();
+  ED.setSelection(pos, pos, "top"); ED.focus();
 }
 
 async function confirmRestore(p, sha) {
@@ -1460,6 +1601,7 @@ const addBtn = document.createElement("button");
 addBtn.type = "button";
 addBtn.className = "c-add";
 addBtn.title = "Ajouter un commentaire (Ctrl+Alt+M)";
+addBtn.setAttribute("aria-label", "Commenter le passage sélectionné");
 addBtn.innerHTML = `${svg("comment")}<b>+</b>`;
 addBtn.hidden = true;
 
@@ -1588,7 +1730,8 @@ function cardHTML(c, inPanel) {
       <div class="c-btns"${t.trim() ? "" : " hidden"}><button class="btn sm" data-c="cancel-reply">Annuler</button><button class="btn btn-primary sm" data-c="reply">Répondre</button></div></div>`;
   }
   const cls = ["c-card", active ? "active" : "", c.resolved ? "resolved" : "", inPanel ? "in-panel" : ""].filter(Boolean).join(" ");
-  return `<div class="${cls}" data-cid="${esc(c.id)}" style="--cc:${esc(c.color || "#888")}">${html}</div>`;
+  const label = `Commentaire de ${c.authorName || "?"}${reps.length ? `, ${reps.length} réponse${reps.length > 1 ? "s" : ""}` : ""}${c.resolved ? ", résolu" : ""}`;
+  return `<div class="${cls}" data-cid="${esc(c.id)}" style="--cc:${esc(c.color || "#888")}" tabindex="0" role="article" aria-label="${esc(label)}">${html}</div>`;
 }
 function draftHTML(inPanel) {
   return `<div class="c-card draft active${inPanel ? " in-panel" : ""}" data-cid="draft" style="--cc:${esc(me.color)}">
@@ -1788,6 +1931,19 @@ function bindCards(box) {
     layoutRail();
   });
   box.addEventListener("keydown", (e) => {
+    // carte sélectionnée au clavier : Entrée l'ouvre (réponses, actions) et place le curseur dans « Répondre »
+    if (e.target.classList && e.target.classList.contains("c-card") && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      const id = e.target.dataset.cid;
+      if (id === "draft") return;
+      activateComment(id, { scroll: true });
+      requestAnimationFrame(() => {
+        const card = box.querySelector(`.c-card[data-cid="${id}"]`);
+        const t = card && (card.querySelector('[data-f="reply"]') || card);
+        if (t) t.focus();
+      });
+      return;
+    }
     const f = e.target.dataset && e.target.dataset.f;
     if (!f) return;
     const id = e.target.closest(".c-card").dataset.cid;
@@ -1838,7 +1994,7 @@ function renderCommentsPanel() {
   const open = commentsList.filter((c) => !c.resolved), done = commentsList.filter((c) => c.resolved);
   $("#ccOpenN").textContent = open.length || "";
   $("#ccDoneN").textContent = done.length || "";
-  for (const b of $$("#commentsPanel [data-tab]")) b.classList.toggle("on", b.dataset.tab === panelTab);
+  for (const b of $$("#commentsPanel [data-tab]")) { b.classList.toggle("on", b.dataset.tab === panelTab); b.setAttribute("aria-selected", String(b.dataset.tab === panelTab)); }
   if (!panelOpen()) return;
   const wrap = $("#commentsList");
   const keep = captureFocus(wrap);
@@ -2427,7 +2583,7 @@ $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
 
 /* ---- Menu « ⋯ » : actions secondaires de la barre d'outils quand la place manque ---- */
 const MORE_LABELS = {
-  btnCopyLink: "Copier le lien", btnToc: "Table des matières", btnAuthors: "Qui a écrit quoi",
+  btnCopyLink: "Copier le lien", btnToc: "Plan du document", btnAuthors: "Qui a écrit quoi",
   btnHistory: "Historique", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
 };
 let moreMenu = null;
@@ -2474,7 +2630,12 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("resize", closeMoreMenu);
 $("#scrim").onclick = () => $("#app").classList.remove("nav-open");
 $("#search").addEventListener("input", renderTree);
+$("#skipToDoc").addEventListener("click", (e) => {
+  e.preventDefault();
+  if (S && S.loaded) ED.focus(); else { const r = $("#tree .node"); if (r) r.focus(); }
+});
 $("#search").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { const r = $('#tree .node[tabindex="0"]') || $("#tree .node"); if (r) { e.preventDefault(); r.focus(); } }
   if (e.key === "Enter") { const first = $("#tree .node.file"); if (first) first.click(); }
   if (e.key === "Escape") { e.target.value = ""; renderTree(); e.target.blur(); }
 });

@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body class="auth-mode">
+  <a class="skip" href="#editor" id="skipToDoc">Aller au document</a>
   <div class="app" id="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
@@ -66,7 +67,7 @@
         <div class="spacer"></div>
         <div class="presence" id="presence"></div>
         <button class="icon-btn tb-more-item" id="btnCopyLink" title="Copier le lien vers ce document (Ctrl+L)" hidden><span data-icon="link"></span></button>
-        <button class="icon-btn tb-more-item" id="btnToc" title="Sommaire du document" hidden><span data-icon="list"></span></button>
+        <button class="icon-btn tb-more-item" id="btnToc" title="Plan du document" aria-pressed="false" hidden><span data-icon="list"></span></button>
         <button class="icon-btn" id="btnComments" title="Tous les commentaires" hidden><span data-icon="comment"></span><span class="c-badge" id="ccBadge" hidden></span></button>
         <button class="icon-btn tb-more-item" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
         <button class="icon-btn tb-more-item" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
@@ -87,6 +88,10 @@
             <button class="btn" id="btnUploadEmpty"><span data-icon="upload"></span>Importer des fichiers</button>
           </div>
         </div>
+        <nav class="outline" id="outline" aria-label="Plan du document" hidden>
+          <div class="ol-head"><span>Plan</span><button class="icon-btn sm" id="btnOutlineClose" title="Masquer le plan"><span data-icon="x"></span></button></div>
+          <div class="ol-list" id="outlineList"></div>
+        </nav>
         <div class="pane pane-editor" id="paneEditor">
           <div class="fmt-bar" id="fmtBar" role="toolbar" aria-label="Mise en forme" hidden>
             <button data-fmt="bold" title="Gras (Ctrl+B)"><b>G</b></button>
@@ -115,8 +120,8 @@
             <button class="icon-btn sm" id="btnCommentsClose" title="Fermer"><span data-icon="x"></span></button>
           </div>
           <div class="cc-tabs" role="tablist">
-            <button data-tab="open" class="on">Ouverts <span class="n" id="ccOpenN"></span></button>
-            <button data-tab="resolved">Résolus <span class="n" id="ccDoneN"></span></button>
+            <button data-tab="open" class="on" role="tab" aria-selected="true">Ouverts <span class="n" id="ccOpenN"></span></button>
+            <button data-tab="resolved" role="tab" aria-selected="false">Résolus <span class="n" id="ccDoneN"></span></button>
           </div>
           <div class="comments-list" id="commentsList"></div>
         </aside>

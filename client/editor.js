@@ -434,9 +434,13 @@ export function createEditor(parent, hooks) {
     setReadOnly(ro) { if (view.state.readOnly !== !!ro) view.dispatch({ effects: readOnlyComp.reconfigure(EditorState.readOnly.of(!!ro)) }); },
     setPlaceholder(t) { view.dispatch({ effects: placeholderComp.reconfigure(cmPlaceholder(t || "")) }); },
     get selection() { return view.state.selection.main; },
+    /** scroll : true (le minimum pour voir le curseur), "top" (la ligne en haut de l'écran) ou false. */
     setSelection(a, b = a, scroll = true) {
       const len = view.state.doc.length;
-      view.dispatch({ selection: EditorSelection.range(Math.min(a, len), Math.min(b, len)), scrollIntoView: scroll });
+      const sel = EditorSelection.range(Math.min(a, len), Math.min(b, len));
+      // marge : la barre de mise en forme reste collée en haut de la zone et masquerait la ligne
+      if (scroll === "top") view.dispatch({ selection: sel, effects: EditorView.scrollIntoView(sel.from, { y: "start", yMargin: 64 }) });
+      else view.dispatch({ selection: sel, scrollIntoView: scroll });
     },
     get hasFocus() { return view.hasFocus; },
     focus() { view.focus(); },
