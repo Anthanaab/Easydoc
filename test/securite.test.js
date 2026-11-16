@@ -12,22 +12,28 @@ test("sécurité", async (t) => {
   t.after(() => srv.stop());
   const { admin, member } = srv;
 
+  // Disque insensible à la casse (Windows, macOS) : « INTERNE » et « Interne » sont le même dossier.
+  // Ailleurs (Linux), ce sont deux dossiers différents : les variantes de majuscules ne désignent
+  // pas le fichier protégé et n'ont rien à vérifier.
+  let ci = false;
   await t.test("droits : un dossier masqué reste masqué, quel que soit le nom employé", async () => {
     assert.equal((await admin.post("/api/create", { path: "Interne/secret.md" })).status, 200);
     assert.equal((await admin.put("/api/admin/access", { path: "Interne", entries: { "*": "none" } })).status, 200);
-    for (const v of ["Interne/secret.md", "INTERNE/secret.md", "interne/SECRET.md", "Interne./secret.md", "Interne /secret.md"]) {
+    ci = fs.existsSync(path.join(srv.repoDir, "INTERNE"));
+    const variants = ["Interne/secret.md", "Interne./secret.md", "Interne /secret.md", ...(ci ? ["INTERNE/secret.md", "interne/SECRET.md"] : [])];
+    for (const v of variants) {
       const r = await member.get(`/api/raw?path=${encodeURIComponent(v)}`);
       assert.ok(r.status >= 400 && !r.text.includes("# secret"), `${v} → ${r.status}`);
     }
     const list = await member.get("/api/files");
     assert.ok(!/interne/i.test(list.text), "absent de la liste des fichiers");
-    const own = await admin.get("/api/raw?path=interne/secret.md");
+    const own = await admin.get(`/api/raw?path=${encodeURIComponent(ci ? "interne/secret.md" : "Interne/secret.md")}`);
     assert.equal(own.status, 200, "l'administrateur y accède toujours");
   });
 
   await t.test("droits : connexion temps réel refusée sur un document masqué", async () => {
     const code = await new Promise((res) => {
-      const ws = new WS(`${srv.base.replace("http", "ws")}/interne/secret.md`, { headers: { Cookie: member.cookie, Origin: srv.base } });
+      const ws = new WS(`${srv.base.replace("http", "ws")}/${ci ? "interne" : "Interne"}/secret.md`, { headers: { Cookie: member.cookie, Origin: srv.base } });
       ws.on("close", (c) => res(c));
       ws.on("error", () => {});
       setTimeout(() => res(null), 3000);
