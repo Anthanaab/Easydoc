@@ -29,7 +29,12 @@ en train d'être tapé.
   pour tous les participants, avec leurs noms dans le message. `Ctrl+S` enregistre tout de suite.
 - **Modifications externes** (agent IA, `git push`, autre outil) détectées toutes les 20 s
   et fusionnées en direct, sans écraser la saisie en cours.
-- Aperçu Markdown (édition / côte à côte / aperçu), liens entre documents, thème clair ou sombre.
+- **Texte mis en forme pendant l'écriture** : titres en grand, gras, italique, listes à puces, cases à
+  cocher cliquables, liens, images, citations et blocs de code s'affichent directement ; les symboles
+  Markdown (`**`, `#`, `[…](…)`) ne réapparaissent que sur la ligne où se trouve le curseur. Barre de
+  mise en forme (gras, titres, listes, lien…) et raccourcis : `Ctrl+B`, `Ctrl+I`, `Ctrl+Alt+1/2/3`,
+  `Ctrl+Maj+7/8/9`, `Ctrl+E`. `Entrée` continue une liste. Les fichiers restent du Markdown standard.
+- Vues édition / côte à côte / aperçu, liens entre documents (`Ctrl+clic`), thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
 - **Autres fichiers** : import par bouton ou glisser-déposer (25 Mo max par fichier). Les PDF et les
   images s'affichent dans la page, les fichiers Word (.docx) en aperçu, les autres (Excel, PowerPoint…)
@@ -215,5 +220,8 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `src/tunnel.js` — tunnel Cloudflare (téléchargement vérifié de cloudflared, supervision, journaux)
 - `src/updater.js` — mise à jour depuis l'interface (essai de la nouvelle version, retour arrière)
 - `public/` — interface (HTML/CSS/JS sans framework)
-- `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, marked,
-  DOMPurify) regroupées en un fichier, servi localement. Après une mise à jour : `npm run build`.
+- `client/editor.js` — l'éditeur (CodeMirror 6 relié au texte partagé par y-codemirror.next) :
+  rendu mis en forme, barre et raccourcis de mise en forme, surlignages des auteurs et commentaires
+- `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, CodeMirror,
+  marked, DOMPurify) et l'éditeur, regroupés en un fichier servi localement. **Après toute
+  modification de `client/` : `npm run build`** (le fichier construit est versionné).

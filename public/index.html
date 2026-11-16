@@ -92,9 +92,25 @@
           </div>
         </div>
         <div class="pane pane-editor" id="paneEditor">
+          <div class="fmt-bar" id="fmtBar" role="toolbar" aria-label="Mise en forme" hidden>
+            <button data-fmt="bold" title="Gras (Ctrl+B)"><b>G</b></button>
+            <button data-fmt="italic" title="Italique (Ctrl+I)"><i>I</i></button>
+            <button data-fmt="strike" title="Barré (Ctrl+Maj+X)"><s>S</s></button>
+            <span class="sep"></span>
+            <button data-fmt="h1" title="Titre 1 (Ctrl+Alt+1)">T1</button>
+            <button data-fmt="h2" title="Titre 2 (Ctrl+Alt+2)">T2</button>
+            <button data-fmt="h3" title="Titre 3 (Ctrl+Alt+3)">T3</button>
+            <span class="sep"></span>
+            <button data-fmt="ul" title="Liste à puces (Ctrl+Maj+8)"><span data-icon="listUl"></span></button>
+            <button data-fmt="ol" title="Liste numérotée (Ctrl+Maj+7)"><span data-icon="listOl"></span></button>
+            <button data-fmt="task" title="Liste de cases à cocher (Ctrl+Maj+9)"><span data-icon="task"></span></button>
+            <span class="sep"></span>
+            <button data-fmt="link" title="Lien"><span data-icon="link"></span></button>
+            <button data-fmt="quote" title="Citation"><span data-icon="quote"></span></button>
+            <button data-fmt="code" title="Code (Ctrl+E)"><span data-icon="code"></span></button>
+          </div>
           <div class="authors-bar" id="authorsBar" hidden></div>
-          <div class="overlay" id="overlay" aria-hidden="true"></div>
-          <textarea id="editor" spellcheck="true" placeholder="Commence à écrire… (Markdown)" aria-label="Contenu du document"></textarea>
+          <div class="editor-host" id="editor"></div>
         </div>
         <div class="pane pane-preview" id="panePreview">
           <article class="prose" id="preview"></article>

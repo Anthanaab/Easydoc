@@ -1,5 +1,5 @@
 // Easydoc — interface (éditeur collaboratif temps réel adossé à un dépôt git/GitHub).
-import { Y, WebsocketProvider, Marked, DOMPurify } from "./vendor/libs.js";
+import { Y, WebsocketProvider, Marked, DOMPurify, createEditor } from "./vendor/libs.js";
 
 /* ============================================================================================
  * Utilitaires
@@ -7,7 +7,6 @@ import { Y, WebsocketProvider, Marked, DOMPurify } from "./vendor/libs.js";
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const LOCAL = { origin: "local-editor" }; // origine des modifications tapées dans cet onglet
 const wsBase = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
 const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
 const fileName = (p) => p.split("/").pop();
@@ -65,6 +64,11 @@ const ICONS = {
   list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
   comment: '<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5Z"/>',
+  listUl: '<path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+  listOl: '<path d="M10 6h10"/><path d="M10 12h10"/><path d="M10 18h10"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
+  task: '<rect width="7" height="7" x="3" y="4" rx="1.5"/><path d="m4.5 7.5 1.5 1.5 2.5-2.5"/><rect width="7" height="7" x="3" y="13" rx="1.5"/><path d="M14 7.5h7"/><path d="M14 16.5h7"/>',
+  quote: '<path d="M7 7h4v4c0 3-1.5 5-4 6"/><path d="M14 7h4v4c0 3-1.5 5-4 6"/>',
+  code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
   more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -354,7 +358,7 @@ async function refreshTree() {
     const cur = currentPath();
     if (cur && !fileInfo.has(cur) && (F || (S && S.loaded))) { toast("Ce fichier n'est plus disponible (supprimé ou accès retiré)."); showEmpty(); }
     else if (F) { F.size = fileInfo.get(F.path).size; renderStatus(); updateButtons(); }
-    else if (S && S.loaded && !S.offline) { ta.readOnly = !canWrite(S.path); renderStatus(); updateButtons(); }
+    else if (S && S.loaded && !S.offline) { ED.setReadOnly(!canWrite(S.path)); renderStatus(); updateButtons(); }
   } catch (e) { toast("Impossible de lire la liste des fichiers : " + e.message, { error: true }); }
 }
 
@@ -428,7 +432,7 @@ function renderTree() {
 /* ============================================================================================
  * Session d'édition (document Markdown / texte ouvert)
  * ========================================================================================== */
-const ta = $("#editor");
+const edHost = $("#editor");          // conteneur de l'éditeur (CodeMirror)
 const paneEditor = $("#paneEditor");
 const panePreview = $("#panePreview");
 const area = $("#area");
@@ -438,6 +442,58 @@ let F = null; // fichier affiché (PDF, Word, image…)
 
 function setArea(state, kind = "") { area.dataset.state = state; area.dataset.kind = kind; }
 function currentView() { return area.dataset.view; }
+
+/* ---- L'éditeur : Markdown mis en forme, branché sur le texte partagé ---- */
+const ED = createEditor(edHost, {
+  marks: (from, to) => editorMarks(from, to),
+  onUpdate: (u, local) => onEditorUpdate(u, local),
+  resolveImage(src) {
+    if (!S || /^[a-z][a-z0-9+.-]*:/i.test(src)) return src;
+    const t = resolveRel(src, S.path);
+    return t ? rawUrl(t) : src;
+  },
+  openLink(href) {
+    if (!href) return;
+    const target = S ? resolveRel(href, S.path) : null;
+    if (target && files.includes(target)) openFile(target);
+    else if (/^(https?:|mailto:)/i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
+  },
+});
+const docKind = (s) => (s.kind === "text" ? "text" : "markdown");
+const placeholderFor = (s, ro) => (ro ? "" : s.kind === "text" ? "Commence à écrire…" : "Commence à écrire… (Markdown : # titre, **gras**, - liste)");
+
+/** Après chaque changement dans l'éditeur (texte, sélection, focus, mise en page). */
+function onEditorUpdate(u, local) {
+  const s = S;
+  if (!s || !s.loaded) return;
+  if (u.docChanged) {
+    if (local && !ED.readOnly) {
+      s.lastLocalEdit = Date.now(); s.dirty = true;
+      if (s.offline) { clearTimeout(s.offlineTimer); s.offlineTimer = setTimeout(() => saveNow(false), 3000); }
+      renderStatus();
+    }
+    schedulePreview();
+  }
+  if (u.docChanged || u.selectionSet) publishLine();
+  if (u.selectionSet || u.focusChanged) {
+    const pointer = u.transactions.some((t) => t.isUserEvent("select.pointer"));
+    caretActivation(pointer);
+    placeAddButton();
+  }
+  if (u.geometryChanged || u.viewportChanged) layoutSoon();
+}
+let layoutRaf = 0;
+function layoutSoon() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnimationFrame(() => { layoutRail(); placeAddButton(); }); }
+
+/* ---- Barre de mise en forme ---- */
+for (const b of $$("#fmtBar [data-fmt]")) {
+  b.addEventListener("mousedown", (e) => e.preventDefault()); // l'éditeur garde le curseur
+  b.addEventListener("click", () => ED.format(b.dataset.fmt));
+}
+function updateFmtBar() {
+  const show = !!(S && S.loaded && S.kind === "markdown" && !ED.readOnly && currentView() !== "preview");
+  $("#fmtBar").hidden = !show;
+}
 
 /* ---- Défilement synchronisé des deux panneaux en vue côte-à-côte ---- */
 let _scrollSync = false; // garde anti-boucle
@@ -457,49 +513,8 @@ function bindPanScroll() {
 }
 bindPanScroll();
 
-function autosize() {
-  const st = paneEditor.scrollTop;
-  ta.style.height = "auto";
-  ta.style.height = Math.max(ta.scrollHeight, paneEditor.clientHeight) + "px";
-  paneEditor.scrollTop = st;
-}
-
-/** Position d'un index après application d'un delta Yjs (garde le curseur en place). */
-function shiftIndex(pos, delta) {
-  let idx = 0;
-  for (const op of delta) {
-    if (op.retain) idx += op.retain;
-    else if (op.insert !== undefined) {
-      const len = typeof op.insert === "string" ? op.insert.length : 1;
-      if (idx < pos) pos += len;
-      idx += len;
-    } else if (op.delete) {
-      if (idx < pos) pos -= Math.min(op.delete, pos - idx);
-    }
-  }
-  return pos;
-}
-
-/** Applique la valeur du textarea au Y.Text par un diff minimal guidé par le curseur. */
-function applyLocal(value) {
-  const yt = S.ytext;
-  const cur = yt.toString();
-  if (cur === value) return;
-  const caret = ta.selectionEnd;
-  let start = 0;
-  const max = Math.min(cur.length, value.length);
-  while (start < max && cur[start] === value[start]) start++;
-  let eCur = cur.length, eNew = value.length;
-  while (eCur > start && eNew > Math.max(start, caret) && cur[eCur - 1] === value[eNew - 1]) { eCur--; eNew--; }
-  S.ydoc.transact(() => {
-    if (eCur > start) yt.delete(start, eCur - start);
-    if (eNew > start) yt.insert(start, value.slice(start, eNew));
-  }, LOCAL);
-}
-
 function closeSession() {
   F = null;
-  overlay.innerHTML = "";
   renderAuthorsBar(null);
   hideTip();
   $("#paneFile").innerHTML = "";
@@ -507,6 +522,8 @@ function closeSession() {
   if (!S) return;
   const s = S;
   S = null;
+  ED.open({ kind: "markdown", text: "", readOnly: true }); // détache l'éditeur du document fermé
+  updateFmtBar();
   clearTimeout(s.fallbackTimer); clearTimeout(s.offlineTimer); clearInterval(s.retryTimer);
   try { s.provider && s.provider.destroy(); } catch (_e) {}
   try { s.ydoc.destroy(); } catch (_e) {}
@@ -517,7 +534,6 @@ function showEmpty() {
   closeSession();
   setPresence("path", null);
   setArea("empty");
-  ta.value = "";
   $("#crumbs").innerHTML = "";
   history.replaceState(null, "", location.pathname);
   document.title = "Easydoc";
@@ -549,13 +565,12 @@ function openFile(path, opts = {}) {
     loaded: false, connected: false, offline: false, reconnecting: false,
     lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null,
   };
-  s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set([LOCAL]), captureTimeout: 600 });
-  provider.awareness.setLocalStateField("user", { name: me.name, color: me.color });
+  // annuler / rétablir : seulement mes propres frappes (l'éditeur ajoute son origine)
+  s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set(), captureTimeout: 600 });
+  provider.awareness.setLocalStateField("user", { name: me.name, color: me.color, colorLight: me.color + "33" });
 
   setArea("loading", s.kind === "text" ? "text" : "");
-  ta.readOnly = true;
-  ta.value = "";
-  ta.placeholder = "Chargement…";
+  ED.open({ kind: docKind(s), text: "", readOnly: true, placeholder: "Chargement…" });
   enterPath(path);
   renderTree(); renderStatus(); renderPresence(); updateButtons();
 
@@ -580,18 +595,6 @@ function openFile(path, opts = {}) {
 
   s.ytext.observe((ev) => { if (S === s && s.loaded) shiftComments(ev.delta); }); // passages commentés
   s.ytext.observe(() => { if (S === s) renderOverlay(); }); // couleurs des auteurs
-  provider.awareness.on("change", () => { if (S === s) renderOverlay(); }); // curseurs des autres
-  s.ytext.observe((event) => {
-    if (S !== s || !s.loaded || event.transaction.origin === LOCAL) return;
-    const val = s.ytext.toString();
-    if (ta.value === val) return;
-    const focused = document.activeElement === ta;
-    const a = shiftIndex(ta.selectionStart, event.delta), b = shiftIndex(ta.selectionEnd, event.delta);
-    ta.value = val;
-    autosize();
-    if (focused) ta.setSelectionRange(a, b);
-    schedulePreview();
-  });
 
   s.meta.observe((event) => {
     if (S !== s) return;
@@ -612,7 +615,6 @@ function openFile(path, opts = {}) {
 }
 
 function onLoaded(s) {
-  s.loaded = true;
   clearTimeout(s.fallbackTimer);
   if (s.meta.get("exists") === false && !files.includes(s.path)) {
     toast("Ce document n'existe pas (ou plus) dans le dépôt.", { error: true });
@@ -620,19 +622,17 @@ function onLoaded(s) {
     return;
   }
   setArea("doc", s.kind === "text" ? "text" : "");
-  ta.readOnly = !canWrite(s.path);
-  ta.placeholder = ta.readOnly ? "" : s.kind === "text" ? "Commence à écrire…" : "Commence à écrire… (Markdown)";
-  ta.value = s.ytext.toString();
-  autosize();
-  if (s.pendingText != null && s.pendingText !== ta.value && !ta.readOnly) {
-    ta.value = s.pendingText;
-    applyLocal(s.pendingText);
+  const ro = !canWrite(s.path);
+  ED.open({ kind: docKind(s), text: s.ytext.toString(), ytext: s.ytext, awareness: s.provider.awareness, undoManager: s.undo, readOnly: ro, placeholder: placeholderFor(s, ro) });
+  s.loaded = true;
+  if (s.pendingText != null && s.pendingText !== ED.text && !ro) {
+    ED.setText(s.pendingText); // passe par l'éditeur : partagé avec les autres
     s.dirty = true; s.lastLocalEdit = Date.now();
     toast("Tes modifications faites pendant la coupure ont été réintégrées.");
   }
   s.pendingText = null;
   s.savedSeen = Date.now();
-  renderPreview(); renderTOC(); renderStatus(); updateButtons(); renderOverlay(); publishCursor();
+  renderPreview(); renderTOC(); renderStatus(); updateButtons(); renderOverlay();
   // charge les commentaires dès l'ouverture pour afficher les bulles en édition comme en côte-à-côte
   loadComments();
 }
@@ -654,8 +654,8 @@ function startReconnect(s) {
       await refreshTree();
       if (S !== s) return;
       if (!fileInfo.has(s.path)) { toast("Ce document n'est plus disponible."); showEmpty(); return; }
-      const pending = s.dirty || ta.value !== s.ytext.toString() ? ta.value : null;
-      openFile(s.path, { force: true, pendingText: pending });
+      // la frappe pendant la coupure est restée dans l'éditeur : elle est réintégrée au retour
+      openFile(s.path, { force: true, pendingText: s.dirty ? ED.text : null });
     } catch (_e) {}
   }, 2000);
 }
@@ -667,12 +667,11 @@ async function startOffline(s) {
   try {
     const d = await api("GET", "/api/file?path=" + encodeURIComponent(s.path));
     if (S !== s) return;
-    s.loaded = true;
     setArea("doc", s.kind === "text" ? "text" : "");
-    ta.readOnly = !canWrite(s.path);
-    ta.placeholder = ta.readOnly ? "" : "Commence à écrire…";
-    ta.value = d.content;
-    autosize(); renderPreview(); renderStatus(); updateButtons();
+    const ro = !canWrite(s.path);
+    ED.open({ kind: docKind(s), text: d.content, readOnly: ro, placeholder: placeholderFor(s, ro) });
+    s.loaded = true;
+    renderPreview(); renderStatus(); updateButtons();
     toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
   } catch (e) {
     toast("Impossible d'ouvrir le document : " + e.message, { error: true });
@@ -683,7 +682,7 @@ async function saveNow(manual) {
   if (!S || !S.loaded) return;
   const s = S;
   const body = { path: s.path };
-  if (s.offline) body.content = ta.value;
+  if (s.offline) body.content = ED.text;
   s.saving = true; renderStatus();
   try {
     const d = await api("POST", "/api/save", body);
@@ -697,43 +696,15 @@ async function saveNow(manual) {
   }
 }
 
-ta.addEventListener("input", () => {
-  const s = S;
-  if (!s || !s.loaded || ta.readOnly) return;
-  s.lastLocalEdit = Date.now(); s.dirty = true;
-  if (s.offline) {
-    clearTimeout(s.offlineTimer);
-    s.offlineTimer = setTimeout(() => saveNow(false), 3000);
-  } else if (!s.reconnecting) {
-    applyLocal(ta.value);
-  }
-  autosize(); schedulePreview(); renderStatus(); publishLine(); renderOverlay(); publishCursor();
-});
-
-ta.addEventListener("keydown", (e) => {
-  if (!S || !S.loaded || ta.readOnly) return;
-  const mod = e.ctrlKey || e.metaKey;
-  if (mod && !S.offline && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
-    e.preventDefault();
-    if (e.key.toLowerCase() === "y" || e.shiftKey) S.undo.redo(); else S.undo.undo();
-    return;
-  }
-  if (e.key === "Tab" && !mod && !e.altKey) {
-    e.preventDefault();
-    document.execCommand("insertText", false, "  ");
-  }
-});
 let lineT = null;
 function publishLine() {
   clearTimeout(lineT);
   lineT = setTimeout(() => {
-    if (!S) return;
-    const line = ta.value.slice(0, ta.selectionStart).split("\n").length;
-    setPresence("line", line);
+    if (!S || !S.loaded) return;
+    setPresence("line", ED.lineAt(ED.selection.head).number);
   }, 250);
 }
-["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
-window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderRail(); } });
+window.addEventListener("resize", () => { if (S && S.loaded) renderRail(); });
 
 /* ============================================================================================
  * Visionneuse (PDF, Word, images, autres fichiers)
@@ -935,36 +906,16 @@ function whenText(min) {
   return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" }) + ` à ${time}`;
 }
 
-/* ---- Calque sous l'éditeur : couleurs des auteurs, curseurs et sélections des autres ---- */
-const overlay = $("#overlay");
-const OV_PROPS = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing", "wordSpacing", "tabSize",
-  "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
-  "boxSizing", "whiteSpace", "overflowWrap", "wordBreak", "textIndent", "fontVariantLigatures", "fontFeatureSettings"];
+/* ---- Surlignages dans l'éditeur : auteurs (« qui a écrit quoi ») et passages commentés ---- */
+// Les curseurs et sélections des autres sont dessinés par l'éditeur lui-même (y-codemirror).
 let ovRaf = 0;
+let authorRuns = null; // [début, fin, auteur, minute] quand « qui a écrit quoi » est affiché
 function renderOverlay() { cancelAnimationFrame(ovRaf); ovRaf = requestAnimationFrame(drawOverlay); }
-
-function remoteCursors() {
-  const out = [];
-  if (!S || !S.provider) return out;
-  S.provider.awareness.getStates().forEach((st, id) => {
-    if (id === S.ydoc.clientID || !st.cursor || !st.user) return;
-    try {
-      const abs = (j) => { const r = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(j), S.ydoc); return r ? r.index : null; };
-      const a = abs(st.cursor.anchor), h = abs(st.cursor.head);
-      if (a == null || h == null) return;
-      out.push({ anchor: a, head: h, name: String(st.user.name || "").slice(0, 40), color: st.user.color || "#888" });
-    } catch (_e) {}
-  });
-  return out;
-}
-
 function drawOverlay() {
   const live = S && S.loaded && !S.offline && !S.reconnecting && currentView() !== "preview";
-  const text = live ? ta.value : "";
-  if (!live || text !== S.ytext.toString()) { overlay.innerHTML = ""; renderAuthorsBar(null); afterOverlay(); return; }
-  const cursors = remoteCursors();
-  const runs = []; // [début, fin, auteur, minute]
-  if (showAuthors) {
+  authorRuns = null;
+  if (live && showAuthors && ED.text === S.ytext.toString()) {
+    const runs = [];
     let i = 0;
     for (const op of S.ytext.toDelta()) {
       if (typeof op.insert !== "string") continue;
@@ -972,72 +923,26 @@ function drawOverlay() {
       runs.push([i, i + op.insert.length, at.a || "", at.t || 0]);
       i += op.insert.length;
     }
+    authorRuns = runs;
   }
-  // passages commentés (toujours visibles) et repère de ma sélection (bouton « commenter »)
-  const anchors = commentAnchors(text.length);
-  const selMark = commentSelMark(text.length);
-  renderAuthorsBar(showAuthors ? runs : null);
-  if (!runs.length && !cursors.length && !anchors.length && selMark == null) { overlay.innerHTML = ""; afterOverlay(); return; }
-
-  // copie exacte de la mise en page du textarea
-  const cs = getComputedStyle(ta);
-  for (const k of OV_PROPS) overlay.style[k] = cs[k];
-  overlay.style.top = ta.offsetTop + "px";
-  overlay.style.left = ta.offsetLeft + "px";
-  overlay.style.width = ta.offsetWidth + "px";
-  overlay.style.height = ta.offsetHeight + "px";
-
-  const pts = new Set([0, text.length]);
-  for (const r of runs) { pts.add(r[0]); pts.add(r[1]); }
-  const caretsAt = new Map();
-  const sels = [];
-  for (const c of cursors) {
-    const h = Math.min(c.head, text.length);
-    pts.add(h);
-    if (!caretsAt.has(h)) caretsAt.set(h, []);
-    caretsAt.get(h).push(c);
-    if (c.anchor !== c.head) {
-      const s = Math.min(c.anchor, c.head), e = Math.min(Math.max(c.anchor, c.head), text.length);
-      sels.push([s, e, c.color]); pts.add(s); pts.add(e);
-    }
-  }
-  for (const a of anchors) { pts.add(a.s); pts.add(a.e); }
-  if (selMark != null) pts.add(selMark);
-  const sorted = [...pts].filter((p) => p >= 0 && p <= text.length).sort((a, b) => a - b);
-  let html = "", ri = 0;
-  for (let k = 0; k < sorted.length; k++) {
-    const p = sorted[k];
-    for (const c of caretsAt.get(p) || []) {
-      html += `<span class="rc" style="--c:${esc(c.color)}"><span class="rc-flag">${esc(c.name)}</span></span>`;
-    }
-    if (p === selMark) html += `<span class="selmark"></span>`;
-    if (k === sorted.length - 1) break;
-    const q = sorted[k + 1];
-    const seg = text.slice(p, q);
-    while (ri < runs.length && runs[ri][1] <= p) ri++;
-    const run = ri < runs.length && runs[ri][0] <= p ? runs[ri] : null;
-    const sel = sels.find((x) => x[0] <= p && q <= x[1]);
-    let attrs = "";
-    const styles = [];
-    const cls = [];
-    if (run && run[2] && (!focusAuthor || focusAuthor === run[2])) {
-      const pr = personOf(run[2]);
-      cls.push("au");
-      styles.push(`--c:${pr.color}`);
-      attrs += ` data-a="${esc(run[2])}" data-t="${run[3]}"`;
-    }
-    if (sel) { cls.push("sel"); styles.push(`--s:${sel[2]}`); }
-    const over = anchors.filter((a) => a.s <= p && q <= a.e);
-    if (over.length) {
-      const top = over.find((a) => a.on) || over[0];
-      cls.push("ca"); if (top.on) cls.push("on"); if (over.length > 1) cls.push("multi");
-      styles.push(`--ca:${esc(top.color)}`);
-      attrs += ` data-cids="${esc(over.map((a) => a.id).join(" "))}"`;
-    }
-    html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
-  }
-  overlay.innerHTML = html + "\u200b";
+  renderAuthorsBar(authorRuns);
+  if (S && S.loaded) ED.refresh();
   afterOverlay();
+}
+/** Passages à surligner entre from et to (appelé par l'éditeur pour la partie affichée). */
+function editorMarks(from, to) {
+  const out = [];
+  if (authorRuns) {
+    for (const [s, e, a, t] of authorRuns) {
+      if (e <= from || s >= to || !a || (focusAuthor && focusAuthor !== a)) continue;
+      out.push({ from: s, to: e, cls: "au", attrs: { style: `--c:${personOf(a).color}`, "data-a": a, "data-t": String(t) } });
+    }
+  }
+  for (const a of commentAnchors(ED.text.length)) {
+    if (a.e <= from || a.s >= to) continue;
+    out.push({ from: a.s, to: a.e, cls: a.on ? "ca on" : "ca", attrs: { style: `--ca:${a.color}`, "data-cids": a.id } });
+  }
+  return out;
 }
 
 function renderAuthorsBar(runs) {
@@ -1045,8 +950,9 @@ function renderAuthorsBar(runs) {
   if (!runs) { if (!bar.hidden) { bar.hidden = true; bar.innerHTML = ""; } return; }
   const totals = new Map();
   let all = 0;
+  const text = S.ytext.toString();
   for (const [s, e, a] of runs) {
-    const n = S.ytext.toString().slice(s, e).replace(/\s/g, "").length;
+    const n = text.slice(s, e).replace(/\s/g, "").length;
     totals.set(a, (totals.get(a) || 0) + n);
     all += n;
   }
@@ -1080,7 +986,6 @@ function toggleAuthors(on = !showAuthors) {
   if (on && currentView() === "preview") setView("edit");
   hideTip();
   renderOverlay();
-  if (S && S.loaded) autosize();
 }
 
 /* ---- Info-bulle au survol d'un passage ---- */
@@ -1090,12 +995,9 @@ function hideTip() { tip.hidden = true; }
 $("#paneEditor").addEventListener("mousemove", (e) => {
   if (!showAuthors) return;
   cancelAnimationFrame(tipRaf);
-  const { clientX: x, clientY: y } = e;
+  const { clientX: x, clientY: y, target } = e;
   tipRaf = requestAnimationFrame(() => {
-    overlay.style.pointerEvents = "auto"; ta.style.pointerEvents = "none";
-    const el = document.elementFromPoint(x, y);
-    overlay.style.pointerEvents = ""; ta.style.pointerEvents = "";
-    const span = el && el.closest ? el.closest("#overlay .au") : null;
+    const span = target && target.closest ? target.closest(".cm-content .au") : null;
     if (!span) return hideTip();
     const pr = personOf(span.dataset.a);
     const when = whenText(Number(span.dataset.t));
@@ -1108,18 +1010,6 @@ $("#paneEditor").addEventListener("mousemove", (e) => {
 });
 $("#paneEditor").addEventListener("mouseleave", hideTip);
 $("#paneEditor").addEventListener("scroll", hideTip, { passive: true });
-
-/* ---- Mon curseur, visible des autres ---- */
-let curT = null;
-function publishCursor() {
-  clearTimeout(curT);
-  curT = setTimeout(() => {
-    if (!S || !S.loaded || S.offline || !S.provider || ta.value !== S.ytext.toString()) return;
-    const rel = (i) => Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(S.ytext, i));
-    S.provider.awareness.setLocalStateField("cursor", { anchor: rel(ta.selectionStart), head: rel(ta.selectionEnd) });
-  }, 60);
-}
-document.addEventListener("selectionchange", () => { if (document.activeElement === ta) publishCursor(); });
 
 /* ---- Historique des modifications ---- */
 function cleanTitle(t) {
@@ -1261,10 +1151,10 @@ function renderTOC() {
   $("#btnToc").hidden = !visible;
   if (!visible) return;
   if (tocBar) closeToc(); // ne pas dupliquer si une barre existe déjà
-  const stash = document.createElement("div"); stash.innerHTML = marked.parse(ta.value || "");
+  const stash = document.createElement("div"); stash.innerHTML = marked.parse(ED.text || "");
   const heads = [...stash.querySelectorAll("h1,h2,h3,h4")].map((h) => ({ level: +h.tagName[1], text: h.textContent, id: h.id }));
   if (!heads.length) return;
-  const headLines = tocHeadingLines(ta.value || ""); // numéros de ligne 1-based de chaque titre (même ordre que `heads`)
+  const headLines = tocHeadingLines(ED.text || ""); // numéros de ligne 1-based de chaque titre (même ordre que `heads`)
   const wrap = document.createElement("div"); wrap.className = "toc"; wrap.id = "toc";
   wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" data-line="${headLines[i]}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
   document.body.appendChild(wrap); tocBar = wrap;
@@ -1335,11 +1225,10 @@ function goToLine(n) {
   // ne force pas la vue : on garde la vue courante (édition OU côte-à-côte).
   // Seul le mode aperçu (sans éditeur visible) bascule en édition pour montrer le curseur.
   if (currentView() === "preview") setView("edit");
-  const lines = ta.value.split("\n");
-  const target = Math.max(0, Math.min(n - 1, lines.length));
+  const lines = ED.text.split("\n");
+  const target = Math.max(0, Math.min(n - 1, lines.length - 1));
   let pos = 0; for (let i = 0; i < target; i++) pos += lines[i].length + 1;
-  ta.focus(); ta.setSelectionRange(pos, pos); publishCursor();
-  paneEditor.scrollTop = (paneEditor.scrollHeight / lines.length) * target;
+  ED.setSelection(pos, pos); ED.focus();
 }
 
 async function confirmRestore(p, sha) {
@@ -1372,7 +1261,7 @@ function schedulePreview() { clearTimeout(previewT); previewT = setTimeout(rende
 function renderPreview() {
   if (!S || S.kind !== "markdown" || currentView() === "edit") return;
   const el = $("#preview");
-  el.innerHTML = DOMPurify.sanitize(marked.parse(ta.value || ""));
+  el.innerHTML = DOMPurify.sanitize(marked.parse(ED.text || ""));
   for (const a of $$("a[href]", el)) {
     if (/^[a-z][a-z0-9+.-]*:/i.test(a.getAttribute("href"))) { a.target = "_blank"; a.rel = "noopener noreferrer"; }
   }
@@ -1398,7 +1287,8 @@ function setView(v) {
   localStorage.setItem("ed-view", v);
   for (const b of $$("#viewSwitch button")) b.classList.toggle("on", b.dataset.view === v);
   renderPreview();
-  if (S && S.loaded) { autosize(); renderRail(); }
+  if (S && S.loaded) renderRail();
+  updateFmtBar();
   renderOverlay();
 }
 for (const b of $$("#viewSwitch button")) b.onclick = () => setView(b.dataset.view);
@@ -1418,7 +1308,7 @@ function renderStatus() {
     if (!S.loaded) { text = "Chargement…"; tone = "busy"; }
     else if (S.offline) { text = S.dirty ? "Hors ligne · enregistrement…" : "Hors ligne · enregistré"; tone = "busy"; }
     else if (S.reconnecting || !S.connected) { text = "Reconnexion…"; tone = "busy"; }
-    else if (ta.readOnly) { text = "Lecture seule"; title = "Tu peux lire ce document mais pas le modifier."; }
+    else if (ED.readOnly) { text = "Lecture seule"; title = "Tu peux lire ce document mais pas le modifier."; }
     else if (err) { text = "Échec de l'enregistrement"; tone = "err"; title = err; }
     else if (S.saving || S.dirty) { text = "Modifications en cours…"; tone = "busy"; }
     else { text = "Enregistré · " + relTime(S.savedSeen || Date.now()); tone = "ok"; }
@@ -1451,6 +1341,7 @@ function updateButtons() {
   $("#btnHistory").hidden = !p;
   $("#btnCopyLink").hidden = !p;
   $("#btnComments").hidden = !(p && S && S.kind === "markdown");
+  updateFmtBar();
   if ($("#btnComments").hidden) closeComments();
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
@@ -1486,7 +1377,7 @@ addBtn.hidden = true;
 const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const linkify = (html) => html.replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)»"']/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
 function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight + 2, 240) + "px"; }
-const docText = () => (S ? (S.offline ? ta.value : S.ytext.toString()) : "");
+const docText = () => (S ? ED.text : "");
 
 /* ---- Ancrage (mêmes règles que src/comments.js côté serveur) ---- */
 function cTail(a, b) { let n = 0; while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++; return n; }
@@ -1551,13 +1442,6 @@ function commentAnchors(len) {
   }
   if (draft && draft.e <= len) out.push({ s: draft.s, e: draft.e, id: "draft", color: me.color, on: true });
   return out;
-}
-/** Début de ma sélection (pour placer le bouton « + »), ou null. */
-function commentSelMark(len) {
-  if (!S || S.kind !== "markdown" || draft || ta.readOnly || document.activeElement !== ta) return null;
-  const a = ta.selectionStart, b = ta.selectionEnd;
-  if (b <= a || !ta.value.slice(a, b).trim()) return null;
-  return Math.min(a, len);
 }
 function afterOverlay() { layoutRail(); placeAddButton(); }
 
@@ -1645,7 +1529,6 @@ function renderRail() {
   }
   renderCommentsPanel();
   updateCommentsBadge();
-  if (changed && S && S.loaded) autosize();
   if (currentView() !== "edit") markPreview();
   renderOverlay(); // → afterOverlay → layoutRail
 }
@@ -1654,10 +1537,9 @@ function renderRail() {
 function measureTops(host) {
   const out = new Map();
   if (host === paneEditor) {
-    const base = overlay.offsetTop;
-    for (const sp of $$(".ca[data-cids]", overlay)) {
-      for (const id of sp.dataset.cids.split(" ")) if (!out.has(id)) out.set(id, base + sp.offsetTop);
-    }
+    const base = paneEditor.scrollTop - paneEditor.getBoundingClientRect().top;
+    for (const c of openThreads()) out.set(c.id, ED.topAt(c._s) + base);
+    if (draft) out.set("draft", ED.topAt(draft.s) + base);
   } else {
     const hr = host.getBoundingClientRect();
     for (const m of $$("mark.cmark", $("#preview"))) {
@@ -1672,7 +1554,7 @@ function measureTops(host) {
 function layoutRail() {
   const host = rail.parentNode;
   if (!host || !area.classList.contains("has-rail")) return;
-  const content = host === paneEditor ? ta : $("#preview");
+  const content = host === paneEditor ? edHost : $("#preview");
   rail.style.left = content.offsetLeft + content.offsetWidth + 12 + "px";
   const tops = measureTops(host);
   const cards = $$(".c-card", rail).map((el) => ({ el, id: el.dataset.cid, want: tops.get(el.dataset.cid) }));
@@ -1692,18 +1574,20 @@ function layoutRail() {
 /* ---- Bouton « + » à côté de la sélection ---- */
 function placeAddButton() {
   if (currentView() !== "preview") {
-    const mark = $(".selmark", overlay);
-    if (!mark) { if (addBtn.parentNode === paneEditor) addBtn.hidden = true; return; }
+    const sel = ED.selection;
+    const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && !ED.readOnly && ED.hasFocus
+      && !sel.empty && docText().slice(sel.from, sel.to).trim();
+    if (!ok) { if (addBtn.parentNode === paneEditor) addBtn.hidden = true; return; }
     if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
-    addBtn.style.top = overlay.offsetTop + mark.offsetTop - 4 + "px";
-    addBtn.style.left = ta.offsetLeft + ta.offsetWidth - 42 + "px";
+    addBtn.style.top = ED.topAt(sel.from) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop - 6 + "px";
+    addBtn.style.left = edHost.offsetLeft + edHost.offsetWidth - 42 + "px";
     addBtn.hidden = false;
   }
 }
 function onPreviewSelection() {
   const pv = $("#preview");
   const sel = getSelection();
-  const ok = S && S.loaded && S.kind === "markdown" && !ta.readOnly && !draft && currentView() !== "edit"
+  const ok = S && S.loaded && S.kind === "markdown" && !ED.readOnly && !draft && currentView() !== "edit"
     && sel.rangeCount && !sel.isCollapsed && pv.contains(sel.anchorNode) && pv.contains(sel.focusNode) && sel.toString().trim();
   if (!ok) { previewSel = null; if (addBtn.parentNode === panePreview) addBtn.hidden = true; return; }
   const range = sel.getRangeAt(0);
@@ -1719,7 +1603,6 @@ function onPreviewSelection() {
 }
 let pselRaf = 0;
 document.addEventListener("selectionchange", () => {
-  if (document.activeElement === ta) renderOverlay(); // repère de sélection → bouton « + »
   cancelAnimationFrame(pselRaf); pselRaf = requestAnimationFrame(onPreviewSelection);
 });
 addBtn.addEventListener("mousedown", (e) => e.preventDefault()); // garde la sélection
@@ -1819,21 +1702,21 @@ $("#preview").addEventListener("click", (e) => {
 
 /* ---- Actions ---- */
 function startDraft() {
-  if (!S || !S.loaded || S.kind !== "markdown" || ta.readOnly || S.offline) return;
+  if (!S || !S.loaded || S.kind !== "markdown" || ED.readOnly || S.offline) return;
   let s, e, top = null;
-  if (currentView() === "preview" || (previewSel && document.activeElement !== ta)) {
+  if (currentView() === "preview" || (previewSel && !ED.hasFocus)) {
     if (!previewSel) return toast("Sélectionne d'abord le passage à commenter.");
     const r = sourceFromPreview(previewSel);
     if (!r) return toast("Passage introuvable dans le document : sélectionne-le dans l'éditeur.", { error: true });
     [s, e] = r; top = previewSel.top;
   } else {
-    s = ta.selectionStart; e = ta.selectionEnd;
+    ({ from: s, to: e } = ED.selection);
     if (e <= s) { // pas de sélection : toute la ligne du curseur
-      const v = ta.value;
+      const v = docText();
       s = v.lastIndexOf("\n", s - 1) + 1;
       e = v.indexOf("\n", s); if (e < 0) e = v.length;
     }
-    const v = ta.value;
+    const v = docText();
     while (s < e && /\s/.test(v[s])) s++;
     while (e > s && /\s/.test(v[e - 1])) e--;
   }
@@ -1846,7 +1729,7 @@ function startDraft() {
   if (!railHost()) openComments(); else renderRail();
   requestAnimationFrame(() => { const t = $('.c-card.draft textarea'); if (t) t.focus(); });
 }
-function cancelDraft() { draft = null; renderRail(); if (currentView() !== "preview") ta.focus(); }
+function cancelDraft() { draft = null; renderRail(); if (currentView() !== "preview") ED.focus(); }
 async function submitDraft() {
   if (!draft || !draft.text.trim() || draft.busy) return;
   const full = docText();
@@ -1902,24 +1785,19 @@ function scrollToComment(id) {
     requestAnimationFrame(() => { const m = $(`#preview mark.cmark[data-cids~="${id}"]`); if (m) m.scrollIntoView({ block: "center", behavior: "smooth" }); });
     return;
   }
-  // l'éditeur est redessiné à la prochaine image : on mesure après
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    const sp = overlay.querySelector(`.ca[data-cids~="${id}"]`);
-    if (sp) paneEditor.scrollTo({ top: overlay.offsetTop + sp.offsetTop - paneEditor.clientHeight / 3, behavior: "smooth" });
-  }));
+  const top = ED.topAt(c._s) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop;
+  paneEditor.scrollTo({ top: top - paneEditor.clientHeight / 3, behavior: "smooth" });
 }
 /** Curseur posé dans un passage commenté → son fil devient actif (comme Google Docs). */
 function caretActivation(fromClick) {
-  if (!S || !S.loaded || draft || document.activeElement !== ta || ta.selectionEnd !== ta.selectionStart) return;
-  const pos = ta.selectionStart;
+  if (!S || !S.loaded || draft || !ED.hasFocus || !ED.selection.empty) return;
+  const pos = ED.selection.head;
   let hit = null;
   for (const c of openThreads()) if (c._s <= pos && pos <= c._e && (!hit || c._e - c._s < hit._e - hit._s)) hit = c;
   const id = hit ? hit.id : null;
   if (id !== activeCid) { activeCid = id; cEditing = null; renderRail(); }
   if (hit && fromClick && !railHost()) { if (!panelOpen()) openComments(); activateComment(hit.id); }
 }
-ta.addEventListener("click", () => caretActivation(true));
-ta.addEventListener("keyup", (e) => { if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End" || e.key.startsWith("Page")) caretActivation(false); });
 
 /** Clics, saisie et touches dans les cartes (marge et panneau). */
 function bindCards(box) {
