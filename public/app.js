@@ -1,5 +1,5 @@
 // Easydoc — interface (éditeur collaboratif temps réel adossé à un dépôt git/GitHub).
-import { Y, WebsocketProvider, DOMPurify, createEditor } from "./vendor/libs.js";
+import { Y, WebsocketProvider, DOMPurify, createEditor, structuredPatch, applyPatch } from "./vendor/libs.js";
 
 /* ============================================================================================
  * Utilitaires
@@ -544,7 +544,8 @@ function openFile(path, opts = {}) {
     path, ydoc, provider, kind: kindOf(path),
     ytext: ydoc.getText("content"), meta: ydoc.getMap("meta"),
     loaded: false, connected: false, offline: false, reconnecting: false,
-    lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null, gotoLine: opts.line || 0,
+    lastLocalEdit: 0, savedSeen: 0, dirty: false, gotoLine: opts.line || 0,
+    pendingText: opts.pendingText ?? null, pendingBase: opts.pendingBase ?? null, // frappe pendant une coupure
   };
   // annuler / rétablir : seulement mes propres frappes (l'éditeur ajoute son origine)
   s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set(), captureTimeout: 600 });
@@ -606,23 +607,57 @@ function onLoaded(s) {
   const ro = !canWrite(s.path);
   ED.open({ kind: docKind(s), text: s.ytext.toString(), ytext: s.ytext, awareness: s.provider.awareness, undoManager: s.undo, readOnly: ro, placeholder: placeholderFor(s, ro) });
   s.loaded = true;
-  if (s.pendingText != null && s.pendingText !== ED.text && !ro) {
-    ED.setText(s.pendingText); // passe par l'éditeur : partagé avec les autres
-    s.dirty = true; s.lastLocalEdit = Date.now();
-    toast("Tes modifications faites pendant la coupure ont été réintégrées.");
-  }
+  if (s.pendingText != null && !ro) reintegrate(s, ED.text); // passe par l'éditeur : partagé avec les autres
   s.pendingText = null;
   s.savedSeen = Date.now();
   renderTOC(); renderStatus(); updateButtons(); renderOverlay();
   if (s.gotoLine) goToLine(s.gotoLine); // ouvert depuis un résultat de recherche
-  // charge les commentaires dès l'ouverture pour afficher les bulles en édition comme en côte-à-côte
+  // charge les commentaires dès l'ouverture pour afficher les bulles dans la marge
   loadComments();
+}
+
+/** Fusion à trois voies, ligne à ligne : rejoue base → mine sur theirs ; null si les mêmes lignes ont changé. */
+function merge3(base, mine, theirs) {
+  if (mine === base || mine === theirs) return theirs;
+  if (theirs === base) return mine;
+  const out = applyPatch(theirs, structuredPatch("base", "mine", base, mine, "", "", { context: 1 }));
+  return out === false ? null : out;
+}
+/**
+ * Réintègre ce qui a été tapé pendant une coupure (s.pendingText, parti de s.pendingBase) dans
+ * la version actuelle `theirs`, sans effacer ce que les autres ont écrit entre-temps.
+ */
+function reintegrate(s, theirs) {
+  const merged = merge3(s.pendingBase == null ? theirs : s.pendingBase, s.pendingText, theirs);
+  if (merged === null) { showConflict(s.pendingText); return; }
+  if (merged === theirs) return;
+  ED.setText(merged);
+  s.dirty = true; s.lastLocalEdit = Date.now();
+  toast("Tes modifications faites pendant la coupure ont été réintégrées.");
+}
+/** Deux versions incompatibles : la mienne est montrée pour être recopiée, rien n'est perdu. */
+function showConflict(mine) {
+  openModal({
+    title: "Modifications en conflit",
+    subtitle: "Pendant la coupure, quelqu'un a modifié les mêmes lignes que toi. Le document affiche sa version ; voici la tienne, à recopier où il faut.",
+    body: `<textarea class="input conflict-text" readonly rows="12">${esc(mine)}</textarea>`,
+    foot: '<button class="btn" data-act="close">Fermer</button><button class="btn btn-primary" data-act="copy">Copier ma version</button>',
+    wide: true,
+    onMount(card) {
+      $('[data-act="close"]', card).onclick = closeModal;
+      $('[data-act="copy"]', card).onclick = async () => {
+        try { await navigator.clipboard.writeText(mine); toast("Ta version est copiée."); }
+        catch (_e) { const t = $(".conflict-text", card); t.focus(); t.select(); toast("Sélectionne le texte puis Ctrl+C."); }
+      };
+    },
+  });
 }
 
 /** Coupure du temps réel : on repart d'un document neuf à la reconnexion (évite les doublons). */
 function startReconnect(s) {
   if (s.reconnecting) return;
   s.reconnecting = true;
+  s.reconnectBase = ED.text; // texte au moment de la coupure : ce qui est tapé ensuite sera réintégré
   try { s.provider.disconnect(); } catch (_e) {}
   renderStatus();
   s.retryTimer = setInterval(async () => {
@@ -636,8 +671,9 @@ function startReconnect(s) {
       await refreshTree();
       if (S !== s) return;
       if (!fileInfo.has(s.path)) { toast("Ce document n'est plus disponible."); showEmpty(); return; }
-      // la frappe pendant la coupure est restée dans l'éditeur : elle est réintégrée au retour
-      openFile(s.path, { force: true, pendingText: s.dirty ? ED.text : null });
+      // la frappe pendant la coupure est restée dans l'éditeur : elle est fusionnée au retour
+      const typed = ED.text !== s.reconnectBase;
+      openFile(s.path, { force: true, pendingText: typed ? ED.text : null, pendingBase: s.reconnectBase });
     } catch (_e) {}
   }, 2000);
 }
@@ -652,7 +688,10 @@ async function startOffline(s) {
     setArea("doc", s.kind === "text" ? "text" : "");
     const ro = !canWrite(s.path);
     ED.open({ kind: docKind(s), text: d.content, readOnly: ro, placeholder: placeholderFor(s, ro) });
+    s.offlineBase = d.content; // version de départ : les enregistrements s'y comparent
     s.loaded = true;
+    if (s.pendingText != null && !ro) reintegrate(s, d.content); // la frappe pendant la coupure n'est pas perdue
+    s.pendingText = null;
     renderTOC(); renderStatus(); updateButtons();
     if (s.gotoLine) goToLine(s.gotoLine);
     toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
@@ -665,15 +704,24 @@ async function saveNow(manual) {
   if (!S || !S.loaded) return;
   const s = S;
   const body = { path: s.path };
-  if (s.offline) body.content = ED.text;
+  const sent = ED.text;
+  if (s.offline) { body.content = sent; body.base = s.offlineBase; }
   s.saving = true; renderStatus();
   try {
     const d = await api("POST", "/api/save", body);
     if (S !== s) return;
     s.savedSeen = Date.now(); s.dirty = false;
+    if (s.offline && typeof d.content === "string") {
+      // le serveur a fusionné avec les modifications des autres : on affiche le résultat
+      s.offlineBase = d.content;
+      if (d.content !== sent && ED.text === sent) { ED.setText(d.content); s.dirty = false; clearTimeout(s.offlineTimer); }
+    }
     if (manual) toast(d.committed ? "Enregistré dans le dépôt." : "Déjà à jour.");
   } catch (e) {
-    toast("Échec de l'enregistrement : " + e.message, { error: true });
+    if (s.offline && /^Conflit/.test(e.message)) {
+      showConflict(sent);
+      openFile(s.path, { force: true }); // repart de la version actuelle
+    } else toast("Échec de l'enregistrement : " + e.message, { error: true });
   } finally {
     s.saving = false; renderStatus();
   }

@@ -22,15 +22,19 @@ const toMin = (d) => { const x = new Date(d).getTime(); return Number.isFinite(x
 /** Opérations minimales pour passer de oldText à newText : [{eq|del|ins, len, text}]. */
 function diffOps(oldText, newText) {
   if (oldText === newText) return [{ op: "eq", len: oldText.length }];
-  const parts = Diff.diffLines(oldText, newText, { stripTrailingCr: false });
+  // délai maximal : deux textes très différents et très longs bloqueraient le serveur
+  const parts = Diff.diffLines(oldText, newText, { stripTrailingCr: false, timeout: 1500 });
+  if (!parts) return [{ op: "del", len: oldText.length }, { op: "ins", len: newText.length, text: newText }].filter((o) => o.len);
   const ops = [];
   const push = (op, text) => { if (text) ops.push({ op, len: text.length, text }); };
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
     const next = parts[i + 1];
     // bloc remplacé : on affine au mot près (garde l'attribution des mots inchangés)
-    if (p.removed && next && next.added && p.value.length + next.value.length < 40000) {
-      for (const w of Diff.diffWordsWithSpace(p.value, next.value)) push(w.added ? "ins" : w.removed ? "del" : "eq", w.value);
+    const words = p.removed && next && next.added && p.value.length + next.value.length < 40000
+      ? Diff.diffWordsWithSpace(p.value, next.value, { timeout: 500 }) : null;
+    if (words) {
+      for (const w of words) push(w.added ? "ins" : w.removed ? "del" : "eq", w.value);
       i++;
     } else push(p.added ? "ins" : p.removed ? "del" : "eq", p.value);
   }
@@ -51,6 +55,18 @@ function applyFineDiff(ytext, newValue, attrs) {
     else { ytext.insert(i, o.text, attrs || {}); i += o.len; }
   }
   return true;
+}
+
+/**
+ * Fusion à trois voies, ligne à ligne : rejoue les modifications base → mine sur theirs.
+ * Retourne le texte fusionné, ou null si les deux versions ont modifié les mêmes lignes.
+ */
+function merge3(base, mine, theirs) {
+  if (mine === base || mine === theirs) return theirs;
+  if (theirs === base) return mine;
+  const patch = Diff.structuredPatch("base", "mine", base, mine, "", "", { context: 1 });
+  const out = Diff.applyPatch(theirs, patch);
+  return out === false ? null : out;
 }
 
 /** Délimitation compacte d'un Y.Text : [[longueur, auteur, minute], …]. */
@@ -339,7 +355,7 @@ class AuthorshipStore {
 }
 
 module.exports = {
-  CLAUDE, nowMin, toMin, diffOps, applyFineDiff, runsFromYText, segmentsFrom, insertSegments,
+  CLAUDE, nowMin, toMin, diffOps, applyFineDiff, merge3, runsFromYText, segmentsFrom, insertSegments,
   historySegments, donorFromBranches, mapLimit,
   reconcile, reconcileSegs, commonChars, replay, mergePreferLive, segmentsFromBlame, keyFromCommit, nameOfKey, AuthorshipStore,
 };

@@ -28,7 +28,15 @@ en train d'être tapé.
 - **Enregistrement automatique** quelques secondes après la dernière frappe : un seul commit
   pour tous les participants, avec leurs noms dans le message. `Ctrl+S` enregistre tout de suite.
 - **Modifications externes** (agent IA, `git push`, autre outil) détectées toutes les 20 s
-  et fusionnées en direct, sans écraser la saisie en cours.
+  et fusionnées en direct, sans écraser la saisie en cours. Un enregistrement ne remplace jamais
+  une version du dépôt qu'Easydoc n'a pas encore intégrée : il la fusionne d'abord.
+- **Rien ne se perd** :
+  - si l'enregistrement échoue (GitHub injoignable, quota dépassé…) au moment où le document
+    est fermé ou le serveur arrêté, ses modifications sont gardées dans `data/recovery` et envoyées
+    au dépôt dès que possible ; rouvert entre-temps, le document repart de cet état ;
+  - ce qui est tapé pendant une coupure de connexion est fusionné, au retour, avec ce que les
+    autres ont écrit entre-temps ; si les mêmes lignes ont changé des deux côtés, ta version
+    s'affiche pour être recopiée.
 - **Texte mis en forme pendant l'écriture** : titres en grand, gras, italique, listes à puces, cases à
   cocher cliquables, liens, images, citations et blocs de code s'affichent directement ; les symboles
   Markdown (`**`, `#`, `[…](…)`) ne réapparaissent que sur la ligne où se trouve le curseur. Barre de

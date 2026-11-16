@@ -16,6 +16,7 @@ import { syntaxTree, syntaxHighlighting, HighlightStyle, LanguageSupport } from 
 import { markdownLanguage, markdownKeymap } from "@codemirror/lang-markdown";
 import { tags } from "@lezer/highlight";
 import { yCollab, yUndoManagerKeymap, ySyncAnnotation } from "y-codemirror.next";
+import { diffChars } from "diff";
 
 /** Redessine les surlignages fournis par l'application (auteurs, commentaires). */
 const refreshEffect = StateEffect.define();
@@ -383,16 +384,31 @@ export function createEditor(parent, hooks) {
       view.setState(EditorState.create({ doc: opts.text || "", extensions: extensions(opts) }));
     },
     get text() { return view.state.doc.toString(); },
-    /** Remplace le texte par une modification minimale (reprise après coupure, mode hors ligne). */
+    /**
+     * Remplace le texte par des modifications minimales (reprise après coupure, mode hors ligne) :
+     * le texte inchangé garde ses auteurs, même entre deux passages modifiés.
+     */
     setText(value) {
       const cur = view.state.doc.toString();
       if (cur === value) return;
-      let a = 0;
-      const max = Math.min(cur.length, value.length);
-      while (a < max && cur.charCodeAt(a) === value.charCodeAt(a)) a++;
-      let e1 = cur.length, e2 = value.length;
-      while (e1 > a && e2 > a && cur.charCodeAt(e1 - 1) === value.charCodeAt(e2 - 1)) { e1--; e2--; }
-      view.dispatch({ changes: { from: a, to: e1, insert: value.slice(a, e2) } });
+      const parts = diffChars(cur, value, { timeout: 500 });
+      const changes = [];
+      if (parts) {
+        let pos = 0;
+        for (const p of parts) {
+          if (p.added) changes.push({ from: pos, insert: p.value });
+          else if (p.removed) { changes.push({ from: pos, to: pos + p.value.length }); pos += p.value.length; }
+          else pos += p.value.length;
+        }
+      } else {
+        let a = 0;
+        const max = Math.min(cur.length, value.length);
+        while (a < max && cur.charCodeAt(a) === value.charCodeAt(a)) a++;
+        let e1 = cur.length, e2 = value.length;
+        while (e1 > a && e2 > a && cur.charCodeAt(e1 - 1) === value.charCodeAt(e2 - 1)) { e1--; e2--; }
+        changes.push({ from: a, to: e1, insert: value.slice(a, e2) });
+      }
+      view.dispatch({ changes });
     },
     get readOnly() { return view.state.readOnly; },
     setReadOnly(ro) { if (view.state.readOnly !== !!ro) view.dispatch({ effects: readOnlyComp.reconfigure(EditorState.readOnly.of(!!ro)) }); },

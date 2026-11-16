@@ -275,6 +275,52 @@ function scheduleSave(name) {
   s.timer = setTimeout(() => { commitDoc(name).catch(() => {}); }, delay);
 }
 
+/**
+ * Intègre une nouvelle version du dépôt (agent IA, git push, autre outil) dans un document
+ * ouvert, sans perdre la saisie en cours : chaque commit intervenu depuis le dernier état connu
+ * est rejoué sur une copie de cet état, puis fusionné (CRDT) dans le document, avec son auteur.
+ * À appeler dans serialize(name).
+ */
+async function mergeExternal(name, doc, newContent) {
+  const s = st(name);
+  let steps = [];
+  try { steps = await withTimeout(externalSteps(name, s.lastRemote, newContent), 8000); } catch (_e) {}
+  if (!steps.length || steps[steps.length - 1].text !== newContent) {
+    let who = { a: repo.mode === "local" ? "x:Modification externe" : "", t: authorship.nowMin() };
+    if (repo.mode !== "local" || !steps.length) {
+      try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
+    }
+    steps.push({ text: newContent, a: who.a, t: who.t });
+  }
+  const who = steps[steps.length - 1];
+  const ytext = doc.getText(TEXT);
+  if (s.baseUpdate) {
+    const tmp = new Y.Doc();
+    Y.applyUpdate(tmp, s.baseUpdate);
+    const before = Y.encodeStateVector(tmp);
+    tmp.transact(() => { for (const x of steps) authorship.applyFineDiff(tmp.getText(TEXT), x.text, x.a ? { a: x.a, t: x.t } : {}); });
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(tmp, before), SERVER);
+    tmp.destroy();
+  } else {
+    // pas d'état de référence (ne devrait pas arriver) : fusion du texte ligne à ligne
+    const merged = authorship.merge3(s.lastRemote || "", ytext.toString(), newContent);
+    const target = merged === null ? ytext.toString() : merged;
+    if (merged === null) console.error(`[sync] ${name} : conflit, la version du dépôt reste dans l'historique`);
+    doc.transact(() => authorship.applyFineDiff(ytext, target, who.a ? { a: who.a, t: who.t } : {}), SERVER);
+  }
+  s.lastRemote = newContent;
+  s.lastCommitted = newContent;
+  s.baseUpdate = Y.encodeStateAsUpdate(doc);
+  if (ytext.toString() !== newContent) { // il reste de la saisie locale à enregistrer
+    s.dirty = true; s.firstDirty = s.firstDirty || Date.now();
+  }
+  doc.transact(() => {
+    doc.getMap("meta").set("externalBy", authorship.nameOfKey(who.a, users) || "");
+    doc.getMap("meta").set("externalAt", Date.now());
+  }, SERVER);
+  authorStore.save(repoKey(), name, ytext.toString(), authorship.runsFromYText(ytext), s.attrV || ATTR_V);
+}
+
 function commitDoc(name, extraAuthor, docArg) {
   return serialize(name, async () => {
     const s = st(name);
@@ -284,31 +330,44 @@ function commitDoc(name, extraAuthor, docArg) {
     if (!doc) return { committed: false };
     const meta = doc.getMap("meta");
     if (!meta.get("loaded")) return { committed: false };
-    const content = doc.getText(TEXT).toString();
-    const snapshot = Y.encodeStateAsUpdate(doc); // état exact correspondant à `content`
-    const runs = authorship.runsFromYText(doc.getText(TEXT));
-    const rk = repoKey();
+    const ytext = doc.getText(TEXT);
     if (extraAuthor) s.authors.add(String(extraAuthor).slice(0, 40));
-    if (content === s.lastCommitted) {
+    if (ytext.toString() === s.lastCommitted) {
       s.dirty = false; s.firstDirty = 0; s.authors.clear();
       doc.transact(() => { meta.set("savedAt", Date.now()); meta.delete("saveError"); }, SERVER); // « à jour »
+      dropRecovery(name);
       return { committed: false };
     }
     const authors = [...s.authors];
     const msg = `Easydoc : ${name} (${authors.length ? authors.join(", ") : "modification"})`;
     try {
-      const r = await repo.writeFile(name, content, msg);
-      authorStore.save(rk, name, content, runs, s.attrV || ATTR_V);
+      let content, snapshot, r;
+      for (let attempt = 0; ; attempt++) {
+        content = ytext.toString();
+        snapshot = Y.encodeStateAsUpdate(doc); // état exact correspondant à `content`
+        try {
+          // `base` : on n'écrase jamais une version du dépôt qu'on n'a pas encore intégrée
+          r = await repo.writeFile(name, content, msg, { base: s.lastRemote == null ? "" : s.lastRemote });
+          break;
+        } catch (e) {
+          if (e.code !== "STALE" || attempt >= 2) throw e;
+          console.log(`[save] ${name} : modifié dans le dépôt entre-temps, fusion avant enregistrement`);
+          await mergeExternal(name, doc, e.current);
+          if (ytext.toString() === e.current) { r = { committed: false }; content = e.current; snapshot = Y.encodeStateAsUpdate(doc); break; }
+        }
+      }
+      authorStore.save(repoKey(), name, content, authorship.runsFromYText(ytext), s.attrV || ATTR_V);
       s.lastCommitted = content;
       s.lastRemote = content;
       s.baseUpdate = snapshot;
       s.authors.clear();
       // d'autres frappes ont pu arriver pendant l'envoi
-      const still = doc.getText(TEXT).toString() !== content;
+      const still = ytext.toString() !== content;
       s.dirty = still;
       s.firstDirty = still ? Date.now() : 0;
       if (still) scheduleSave(name);
-      comments.refresh(name, doc.getText(TEXT).toString());
+      dropRecovery(name);
+      comments.refresh(name, ytext.toString());
       doc.transact(() => {
         meta.set("savedAt", Date.now());
         meta.set("savedBy", authors.join(", "));
@@ -325,8 +384,70 @@ function commitDoc(name, extraAuthor, docArg) {
   });
 }
 
+// ---- Secours : modifications pas encore enregistrées dans le dépôt -------------------------------
+// Si l'enregistrement échoue au moment où le document quitte la mémoire (dernier participant parti,
+// arrêt du serveur, mise à jour) — GitHub injoignable, quota dépassé… — l'état du document est gardé
+// sur le disque (data/recovery) et renvoyé au dépôt dès que possible. Rouvert entre-temps, le
+// document repart de cet état : rien de ce qui a été tapé n'est perdu.
+const RECOVERY_DIR = path.join(DATA_DIR, "recovery");
+const recoveryFile = (name) => path.join(RECOVERY_DIR, require("crypto").createHash("sha1").update(`${repoKey()}|${name}`).digest("hex") + ".json");
+function keepRecovery(name, doc) {
+  const s = st(name);
+  s.recovery = { update: Y.encodeStateAsUpdate(doc), base: s.lastRemote, baseUpdate: s.baseUpdate };
+  try {
+    fs.mkdirSync(RECOVERY_DIR, { recursive: true });
+    const b64 = (u) => (u ? Buffer.from(u).toString("base64") : null);
+    fs.writeFileSync(recoveryFile(name), JSON.stringify({ name, repo: repoKey(), at: Date.now(), base: s.lastRemote,
+      update: b64(s.recovery.update), baseUpdate: b64(s.baseUpdate) }), { mode: 0o600 });
+  } catch (e) { console.error(`[secours] ${name} : ${e.message}`); }
+  console.error(`[secours] ${name} : modifications gardées en attendant de pouvoir les enregistrer`);
+  scheduleRecovery(name, 30000);
+}
+function dropRecovery(name) {
+  const s = st(name);
+  if (!s.recovery) return;
+  s.recovery = null;
+  clearTimeout(s.recoveryTimer);
+  try { fs.unlinkSync(recoveryFile(name)); } catch (_e) {}
+  console.log(`[secours] ${name} : modifications enregistrées dans le dépôt`);
+}
+function scheduleRecovery(name, delay) {
+  const s = st(name);
+  clearTimeout(s.recoveryTimer);
+  s.recoveryTimer = setTimeout(() => retryRecovery(name).catch(() => {}), delay);
+  s.recoveryTimer.unref();
+}
+async function retryRecovery(name) {
+  const s = st(name);
+  if (!s.recovery || yws.docs.get(name)) return; // rouvert : le document vivant s'en charge
+  const tmp = new Y.Doc();
+  Y.applyUpdate(tmp, s.recovery.update);
+  s.dirty = true;
+  try { await commitDoc(name, null, tmp); }
+  catch (_e) { scheduleRecovery(name, 120000); }
+  finally { tmp.destroy(); }
+}
+/** Au démarrage : reprise des modifications gardées par une exécution précédente. */
+function loadRecoveries() {
+  let list = [];
+  try { list = fs.readdirSync(RECOVERY_DIR).filter((f) => f.endsWith(".json")); } catch (_e) { return; }
+  for (const f of list) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(RECOVERY_DIR, f), "utf8"));
+      if (j.repo !== repoKey() || !j.update) continue;
+      const s = st(j.name);
+      s.recovery = { update: new Uint8Array(Buffer.from(j.update, "base64")), base: j.base };
+      s.lastRemote = j.base;
+      s.lastCommitted = j.base;
+      if (j.baseUpdate) s.baseUpdate = new Uint8Array(Buffer.from(j.baseUpdate, "base64"));
+      console.log(`[secours] ${j.name} : modifications non enregistrées reprises`);
+      scheduleRecovery(j.name, 5000);
+    } catch (e) { console.error(`[secours] ${f} : ${e.message}`); }
+  }
+}
+
 async function flushAll() {
-  await Promise.all(openDocs().map(([name]) => (st(name).dirty ? commitDoc(name).catch(() => {}) : null)));
+  await Promise.all(openDocs().map(([name, doc]) => (st(name).dirty ? commitDoc(name).catch(() => keepRecovery(name, doc)) : null)));
 }
 
 // ---- Chargement / déchargement des documents (persistance y-websocket) --------------------------
@@ -337,26 +458,36 @@ yws.setPersistence({
     await s.chain; // un enregistrement de ce document est peut-être en cours : on l'attend
     const meta = doc.getMap("meta");
     try {
-      const file = await repo.readFile(name);
-      const content = file ? file.content : "";
-      const init = content ? await initialSegments(name, content) : { segs: [], v: ATTR_V };
-      doc.transact(() => {
-        const t = doc.getText(TEXT);
-        if (t.length === 0 && content) authorship.insertSegments(t, init.segs);
-        meta.set("loaded", true);
-        meta.set("exists", !!file);
-      }, SERVER);
-      s.attrV = init.v;
-      if (content && init.v === ATTR_V) authorStore.save(repoKey(), name, content, authorship.runsFromYText(doc.getText(TEXT)), ATTR_V);
-      if (init.later) {
-        init.later.then((segs) => applyLater(name, doc, content, segs))
-          .catch((e) => console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`));
+      if (s.recovery) {
+        // des modifications attendent encore d'être enregistrées : on repart de cet état
+        Y.applyUpdate(doc, s.recovery.update, SERVER);
+        doc.transact(() => { meta.set("loaded", true); meta.set("exists", true); }, SERVER);
+        clearTimeout(s.recoveryTimer);
+        comments.anchorAll(name, doc.getText(TEXT).toString());
+        s.dirty = true; s.firstDirty = Date.now();
+        scheduleSave(name);
+      } else {
+        const file = await repo.readFile(name);
+        const content = file ? file.content : "";
+        const init = content ? await initialSegments(name, content) : { segs: [], v: ATTR_V };
+        doc.transact(() => {
+          const t = doc.getText(TEXT);
+          if (t.length === 0 && content) authorship.insertSegments(t, init.segs);
+          meta.set("loaded", true);
+          meta.set("exists", !!file);
+        }, SERVER);
+        s.attrV = init.v;
+        if (content && init.v === ATTR_V) authorStore.save(repoKey(), name, content, authorship.runsFromYText(doc.getText(TEXT)), ATTR_V);
+        if (init.later) {
+          init.later.then((segs) => applyLater(name, doc, content, segs))
+            .catch((e) => console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`));
+        }
+        comments.anchorAll(name, doc.getText(TEXT).toString());
+        s.lastCommitted = file ? content : null;
+        s.lastRemote = s.lastCommitted;
+        s.baseUpdate = Y.encodeStateAsUpdate(doc);
+        s.dirty = false;
       }
-      comments.anchorAll(name, doc.getText(TEXT).toString());
-      s.lastCommitted = file ? content : null;
-      s.lastRemote = s.lastCommitted;
-      s.baseUpdate = Y.encodeStateAsUpdate(doc);
-      s.dirty = false;
     } catch (e) {
       console.error(`[load] ${name} : ${e.message}`);
       doc.transact(() => meta.set("loadError", String(e.message).slice(0, 200)), SERVER);
@@ -391,9 +522,19 @@ yws.setPersistence({
   // dernier participant parti : on enregistre avant de libérer la mémoire
   writeState: async (name, doc) => {
     if (name === SYSTEM_DOC) return;
-    if (st(name).dirty) await commitDoc(name, null, doc).catch(() => {});
-    comments.refresh(name, doc.getText(TEXT).toString());
-    comments.flush();
+    const s = st(name);
+    if (s.dirty) {
+      try { await commitDoc(name, null, doc); }
+      catch (_e) { keepRecovery(name, doc); } // rien n'est perdu : nouvel essai plus tard
+      clearTimeout(s.timer); // le nouvel essai passe par le secours, le document n'est plus en mémoire
+    }
+    try {
+      comments.refresh(name, doc.getText(TEXT).toString());
+      comments.flush();
+    } catch (e) { console.error(`[commentaires] ${name} : ${e.message}`); }
+    // mémoire : l'état de référence n'est plus utile une fois le document enregistré et fermé
+    // (sauf s'il vient d'être rouvert : y-websocket l'a alors déjà recréé dans sa table)
+    if (!s.dirty && !s.recovery && !yws.docs.has(name)) states.delete(name);
   },
 });
 
@@ -402,12 +543,12 @@ let lastHead = null;
 let lastLocalSig = null;
 async function pollExternal(force = false) {
   let headChanged = false;
+  let head = null;
   if (repo.mode === "github") {
     // une seule requête tant que rien n'a bougé sur la branche
-    const head = await repo.headSha();
+    head = await repo.headSha();
     if (!force && head === lastHead) return { changed: 0 };
     headChanged = head !== lastHead;
-    lastHead = head;
   } else {
     // dépôt local : fichiers ajoutés / supprimés sur le disque (par un agent, un partage réseau…)
     const sig = (await repo.listFiles()).map((f) => `${f.path}:${f.size}`).sort().join("|");
@@ -415,52 +556,25 @@ async function pollExternal(force = false) {
     lastLocalSig = sig;
   }
   // mode local : lecture directe des fichiers ouverts (un agent peut les modifier sur le disque)
-  let changed = 0;
+  let changed = 0, failed = 0;
   for (const [name, doc] of openDocs()) {
     const s = st(name);
     if (!doc.getMap("meta").get("loaded")) continue;
     try {
       await serialize(name, async () => {
         const file = await repo.readFile(name);
-        if (!file) return;
-        if (file.content === s.lastRemote) return; // rien de nouveau
-        // base = dernier état connu du dépôt ; on applique base→distant sur une copie,
-        // puis on fusionne cette copie dans le document vivant (CRDT : la saisie en cours est préservée)
-        // chaque commit intervenu depuis le dernier état connu, dans l'ordre, avec son auteur
-        let steps = [];
-        try { steps = await withTimeout(externalSteps(name, s.lastRemote, file.content), 8000); } catch (_e) {}
-        if (!steps.length || steps[steps.length - 1].text !== file.content) {
-          let who = { a: repo.mode === "local" ? "x:Modification externe" : "", t: authorship.nowMin() };
-          if (repo.mode !== "local" || !steps.length) {
-            try { const c = await withTimeout(repo.lastCommit(name), 8000); if (c) who = { a: keyOfCommit(c), t: authorship.toMin(c.date) }; } catch (_e) {}
-          }
-          steps.push({ text: file.content, a: who.a, t: who.t });
-        }
-        const who = steps[steps.length - 1];
-        const tmp = new Y.Doc();
-        if (s.baseUpdate) Y.applyUpdate(tmp, s.baseUpdate);
-        const before = Y.encodeStateVector(tmp);
-        tmp.transact(() => { for (const x of steps) authorship.applyFineDiff(tmp.getText(TEXT), x.text, x.a ? { a: x.a, t: x.t } : {}); });
-        const delta = Y.encodeStateAsUpdate(tmp, before);
-        Y.applyUpdate(doc, delta, SERVER);
-        tmp.destroy();
-        s.lastRemote = file.content;
-        s.lastCommitted = file.content;
-        s.baseUpdate = Y.encodeStateAsUpdate(doc);
-        if (doc.getText(TEXT).toString() !== file.content) { // il reste de la saisie locale à enregistrer
-          s.dirty = true; s.firstDirty = s.firstDirty || Date.now(); scheduleSave(name);
-        }
-        doc.transact(() => {
-          doc.getMap("meta").set("externalBy", authorship.nameOfKey(who.a, users) || "");
-          doc.getMap("meta").set("externalAt", Date.now());
-        }, SERVER);
-        authorStore.save(repoKey(), name, doc.getText(TEXT).toString(), authorship.runsFromYText(doc.getText(TEXT)), s.attrV || ATTR_V);
+        if (!file || file.content === s.lastRemote) return; // rien de nouveau
+        await mergeExternal(name, doc, file.content);
+        if (s.dirty) scheduleSave(name);
         changed++;
       });
     } catch (e) {
+      failed++;
       console.error(`[sync] ${name} : ${e.message}`);
     }
   }
+  // un échec sera retenté au prochain passage, même si la branche n'a plus bougé
+  if (repo.mode === "github" && !failed) lastHead = head;
   if (headChanged || changed) bump("treeVersion");
   return { changed };
 }
@@ -486,8 +600,8 @@ async function resetDocs() {
     if (name === SYSTEM_DOC) continue;
     detachDoc(name, doc);
   }
-  for (const s of states.values()) clearTimeout(s.timer);
-  states.clear();
+  for (const s of states.values()) { clearTimeout(s.timer); clearTimeout(s.recoveryTimer); }
+  states.clear(); // les secours restent sur le disque, rattachés à leur dépôt
   lastHead = null;
   lastLocalSig = null;
 }
@@ -884,13 +998,28 @@ app.post("/api/save", async (req, res) => {
   try {
     const doc = yws.docs.get(p);
     if (typeof req.body.content === "string") {
-      const content = req.body.content;
+      // `base` : le texte dont ce client est parti. Ses modifications sont rejouées sur la
+      // version actuelle (celle des autres participants et du dépôt) au lieu de l'écraser.
+      const mine = req.body.content;
+      const base = typeof req.body.base === "string" ? req.body.base : null;
       if (doc && doc.getMap("meta").get("loaded")) {
-        doc.transact(() => authorship.applyFineDiff(doc.getText(TEXT), content, userAttrs(req.user)), "offline-client");
-      } else {
-        const r = await serialize(p, () => repo.writeFile(p, content, `Easydoc : ${p} (${author || "modification"})`));
-        return res.json({ ok: true, committed: r.committed });
+        const cur = doc.getText(TEXT).toString();
+        const merged = base === null ? mine : authorship.merge3(base, mine, cur);
+        if (merged === null) return bad(res, 409, "Conflit : ce passage a aussi été modifié par quelqu'un d'autre.");
+        doc.transact(() => authorship.applyFineDiff(doc.getText(TEXT), merged, userAttrs(req.user)), "offline-client");
+        const r = await commitDoc(p, author);
+        return res.json({ ok: true, committed: r.committed, content: merged });
       }
+      const out = await serialize(p, async () => {
+        const f = await repo.readFile(p);
+        const cur = f ? f.content : "";
+        const merged = base === null ? mine : authorship.merge3(base, mine, cur);
+        if (merged === null) return null;
+        const r = await repo.writeFile(p, merged, `Easydoc : ${p} (${author || "modification"})`, { base: cur });
+        return { committed: r.committed, content: merged };
+      });
+      if (!out) return bad(res, 409, "Conflit : ce passage a aussi été modifié par quelqu'un d'autre.");
+      return res.json({ ok: true, ...out });
     }
     if (!doc) return res.json({ ok: true, committed: false });
     const r = await commitDoc(p, author);
@@ -1077,19 +1206,27 @@ app.post("/api/restore", async (req, res) => {
   if (!allow(req, res, v, "write")) return;
   if (!/^[0-9a-f]{7,40}$/.test(sha)) return bad(res, 400, "Version invalide.");
   try {
-    const content = await repo.readAt(v, sha); // null si la version n'existe pas à ce commit
-    if (content === null) return bad(res, 404, "Ce document n'existe pas à cette version.");
+    const raw = await repo.readRawAt(v, sha); // null si le fichier n'existe pas à ce commit
+    if (raw === null) return bad(res, 404, "Ce document n'existe pas à cette version.");
+    const text = isEditable(v);
+    const content = text ? raw.toString("utf8") : raw; // PDF, images… : octets intacts
     const msg = `Easydoc : restauration de ${v} (${req.user.displayName})`;
-    const r = await repo.writeFile(v, content, msg);
-    // recharge la version live (si le document est ouvert) puis notifie les autres clients
-    const live = yws.docs.get(v);
-    if (live && live.getMap("meta").get("loaded")) {
-      const s2 = st(v);
-      s2.lastCommitted = null; s2.lastRemote = content; s2.baseUpdate = null;
-      live.transact(() => { applyDiff(live.getText(TEXT), content); live.getMap("meta").set("restoredAt", Date.now()); }, SERVER);
-    }
+    const r = await serialize(v, async () => {
+      const w = await repo.writeFile(v, content, msg); // restauration voulue : écrase la version actuelle
+      // recharge la version ouverte (si le document est ouvert) puis prévient les autres
+      const live = text ? yws.docs.get(v) : null;
+      if (live && live.getMap("meta").get("loaded")) {
+        live.transact(() => { applyDiff(live.getText(TEXT), content); live.getMap("meta").set("restoredAt", Date.now()); }, SERVER);
+        const s2 = st(v);
+        s2.lastCommitted = content; s2.lastRemote = content;
+        s2.baseUpdate = Y.encodeStateAsUpdate(live);
+        s2.dirty = live.getText(TEXT).toString() !== content;
+        if (s2.dirty) scheduleSave(v);
+      }
+      return w;
+    });
     bump("treeVersion");
-    res.json({ ok: true, committed: r.committed, content });
+    res.json({ ok: true, committed: r.committed });
   } catch (e) { bad(res, 500, e.message); }
 });
 
@@ -1190,6 +1327,7 @@ app.post("/api/settings", adminOnly, async (req, res) => {
       purgeEnvCredentials();
       await repo.switch({ githubToken: "", githubRepo: "", githubBranch: "" });
       await repo.seedIfEmpty();
+      loadRecoveries();
       bump("configVersion");
       return res.json({ ok: true, mode: "local" });
     }
@@ -1203,6 +1341,7 @@ app.post("/api/settings", adminOnly, async (req, res) => {
     settings.save({ githubToken: token, githubRepo: name, githubBranch: branch, githubLogin: t.login });
     await repo.switch({ githubToken: token, githubRepo: name, githubBranch: branch });
     const seeded = await repo.seedIfEmpty();
+    loadRecoveries();
     bump("configVersion");
     res.json({ ok: true, mode: "github", repo: name, branch, login: t.login, seeded });
   } catch (e) {
@@ -1275,6 +1414,7 @@ async function beforeExit() {
   try { await Promise.race([flushAll(), new Promise((r) => setTimeout(r, 8000))]); } catch (_e) {}
   sessions.flush();
   try { comments.flush(); } catch (_e) {}
+  for (const [name, doc] of openDocs()) if (st(name).dirty) keepRecovery(name, doc); // enregistrement impossible : gardé
   try { await tunnel.stop(true); } catch (_e) {}
 }
 async function shutdown(sig) {
@@ -1307,6 +1447,7 @@ async function main() {
   await repo.init();
   try { await repo.seedIfEmpty(); } catch (e) { console.error("[seed]", e.message); }
   try { lastHead = await repo.headSha(); } catch (_e) {}
+  loadRecoveries(); // modifications non enregistrées lors de la dernière exécution
   if (!users.count()) console.log("[auth] aucun compte : le premier visiteur crée le compte administrateur.");
   server.listen(PORT, () => {
     console.log(`Easydoc ${pkg.version} — http://localhost:${PORT} — ${repo.mode === "github"

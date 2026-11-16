@@ -138,14 +138,27 @@ class RepoService {
     return r ? { content: r.buf.toString("utf8"), sha: r.sha } : null;
   }
 
-  /** Écrit un fichier (github : commit ; local : écriture + commit). Ne fait rien si inchangé. */
-  async writeFile(rel, content, message) {
+  /**
+   * Écrit un fichier (github : commit ; local : écriture + commit). Ne fait rien si inchangé.
+   * `opts.base` : contenu que l'appelant croit être dans le dépôt. Si le fichier a changé
+   * entre-temps (agent, git push…), rien n'est écrit et une erreur `STALE` porte le contenu
+   * actuel (`err.current`) : l'appelant le fusionne d'abord, au lieu de l'écraser.
+   */
+  async writeFile(rel, content, message, opts = {}) {
     const buf = toBuf(content);
+    const checkBase = (exist) => {
+      if (opts.base === undefined || !exist) return; // fichier absent : il est (re)créé
+      const cur = exist.buf.toString("utf8");
+      if (cur !== opts.base && !exist.buf.equals(buf)) {
+        throw Object.assign(new Error("Le fichier a été modifié dans le dépôt entre-temps."), { code: "STALE", current: cur });
+      }
+    };
     if (this.mode === "github") {
       const { owner, repo } = this._split();
       for (let attempt = 0; attempt < 3; attempt++) {
         const exist = await this.readRaw(rel);
         if (exist && exist.buf.equals(buf)) return { committed: false };
+        checkBase(exist);
         const body = {
           owner, repo, path: rel, message, branch: this.options.githubBranch,
           content: buf.toString("base64"),
@@ -161,11 +174,13 @@ class RepoService {
       }
     }
     const full = this._local(rel);
-    if (fs.existsSync(full) && fs.readFileSync(full).equals(buf)) return { committed: false };
+    const existBuf = fs.existsSync(full) ? fs.readFileSync(full) : null;
+    if (existBuf && existBuf.equals(buf)) return { committed: false };
+    checkBase(existBuf && { buf: existBuf });
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, buf);
     try {
-      await this.git.add(rel);
+      await this.git.raw(["add", "--", rel]); // « -- » : un nom de fichier n'est jamais lu comme une option
       await this.git.commit(message);
     } catch (e) {
       console.error("[git] commit :", e.message.split("\n")[0]);
@@ -192,7 +207,7 @@ class RepoService {
     const root = path.resolve(this.options.localRepoDir);
     while (dir !== root && dir.startsWith(root) && fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); dir = path.dirname(dir); }
     try {
-      await this.git.rm(rel);
+      await this.git.raw(["rm", "-f", "--", rel]);
       await this.git.commit(message);
     } catch (e) {
       console.error("[git] suppression :", e.message.split("\n")[0]);
@@ -354,21 +369,27 @@ class RepoService {
 
   /** Contenu texte d'un fichier à une version donnée (null s'il n'existe pas à cette version). */
   async readAt(rel, ref) {
+    const buf = await this.readRawAt(rel, ref);
+    return buf ? buf.toString("utf8") : null;
+  }
+
+  /** Octets d'un fichier à une version donnée (null s'il n'existe pas) : PDF, images… intacts. */
+  async readRawAt(rel, ref) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
       try {
         const { data } = await this.octokit.rest.repos.getContent({ owner, repo, path: rel, ref });
         if (Array.isArray(data) || data.type !== "file") return null;
-        if (data.encoding === "base64" && data.content) return Buffer.from(data.content, "base64").toString("utf8");
-        if (!data.size) return "";
+        if (data.encoding === "base64" && data.content) return Buffer.from(data.content, "base64");
+        if (!data.size) return Buffer.alloc(0);
         const blob = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: data.sha });
-        return Buffer.from(blob.data.content, "base64").toString("utf8");
+        return Buffer.from(blob.data.content, "base64");
       } catch (e) {
         if (e.status === 404 || e.status === 409) return null;
         throw e;
       }
     }
-    try { return await this.git.raw(["show", `${ref}:${rel}`]); } catch (_e) { return null; }
+    try { return await this.git.binaryCatFile(["-p", `${ref}:${rel}`]); } catch (_e) { return null; }
   }
 
   /** Crée quelques documents de départ si le dépôt est vide. */
