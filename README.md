@@ -155,6 +155,30 @@ Disponible pour l'installation Proxmox (clone git lancé par systemd). Le script
 nécessaire quand une version demande un Node.js plus récent (Easydoc le signale) ; avec Docker,
 reconstruis l'image.
 
+## Sauvegardes
+
+Le dépôt GitHub garde les documents, mais pas le reste : comptes, droits d'accès, commentaires,
+« qui a écrit quoi », réglages, modifications en attente d'enregistrement. En dépôt local, les
+documents eux-mêmes ne sont que sur le serveur. **Administration → Sauvegardes** :
+
+- **Sauvegarde automatique chaque jour** (activée par défaut), les 7 dernières gardées dans
+  `data/backups/` (nombre réglable).
+- **Sauvegarder et télécharger** : une archive à garder ailleurs que sur le serveur.
+- En ligne de commande : `node cli.js backup [fichier.tar.gz]` (sur Proxmox, dans le conteneur :
+  `cd /opt/easydoc && node cli.js backup`).
+
+L'archive (`.tar.gz` standard) contient le jeton GitHub et les empreintes des mots de passe :
+range-la en lieu sûr. Le programme `cloudflared` et les caches n'y sont pas (ils se retéléchargent).
+
+**Restaurer** — Easydoc arrêté, extraire l'archive dans le dossier de données, puis relancer :
+
+```bash
+systemctl stop easydoc
+tar -xzf easydoc-AAAA-MM-JJ-HHMM.tar.gz -C /opt/easydoc/data
+chown -R easydoc:easydoc /opt/easydoc/data   # le service tourne sous l'utilisateur easydoc
+systemctl start easydoc
+```
+
 ## Qui a écrit quoi
 
 - Chaque caractère tapé dans Easydoc est attribué **par le serveur** au compte connecté (impossible
@@ -246,6 +270,7 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `src/authorship.js` — attribution des auteurs (marquage Yjs, diff, blame, fichiers annexes)
 - `src/tunnel.js` — tunnel Cloudflare (téléchargement vérifié de cloudflared, supervision, journaux)
 - `src/updater.js` — mise à jour depuis l'interface (essai de la nouvelle version, retour arrière)
+- `src/backup.js` — sauvegardes des données (archive tar.gz, sauvegardes automatiques)
 - `public/` — interface (HTML/CSS/JS sans framework)
 - `client/editor.js` — l'éditeur (CodeMirror 6 relié au texte partagé par y-codemirror.next) :
   rendu mis en forme, barre et raccourcis de mise en forme, surlignages des auteurs et commentaires

@@ -30,6 +30,7 @@ const authorship = require("./src/authorship");
 const { CommentStore, locate: locateQuote, context: quoteContext } = require("./src/comments");
 const { TunnelManager } = require("./src/tunnel");
 const { Updater } = require("./src/updater");
+const { BackupManager } = require("./src/backup");
 const pkg = require("./package.json");
 
 const ENV_FILE = process.env.ENV_FILE || path.join(__dirname, ".env");
@@ -855,6 +856,34 @@ app.delete("/api/admin/tunnel", adminOnly, async (req, res) => {
 });
 
 // ---- Mise à jour d'Easydoc (administrateurs) ------------------------------------------------------------
+// ---- Sauvegardes des données (administrateurs) ---------------------------------------------------
+const backups = new BackupManager({
+  dataDir: DATA_DIR, localRepoDir: LOCAL_DIR,
+  meta: () => ({ version: pkg.version, mode: repo.mode, depot: repo.mode === "github" ? repo.options.githubRepo : "local" }),
+  // documents ouverts enregistrés et fichiers en attente écrits : la sauvegarde est cohérente
+  beforeBackup: async () => { await flushAll(); sessions.flush(); comments.flush(); },
+});
+app.get("/api/admin/backups", adminOnly, (_req, res) => res.json({
+  ok: true, ...backups.settings, list: backups.list(), running: !!backups.running, lastError: backups.lastError, dir: backups.dir,
+}));
+app.post("/api/admin/backups", adminOnly, async (_req, res) => {
+  try { const r = await backups.create("manuelle"); res.json({ ok: true, ...r }); }
+  catch (e) { bad(res, 500, "Sauvegarde impossible : " + e.message); }
+});
+app.put("/api/admin/backups", adminOnly, (req, res) => {
+  try { backups.save({ auto: req.body.auto, keep: Number(req.body.keep) }); res.json({ ok: true, ...backups.settings, list: backups.list() }); }
+  catch (e) { bad(res, 500, e.message); }
+});
+app.get("/api/admin/backups/download", adminOnly, (req, res) => {
+  const p = backups.pathOf(req.query.name);
+  if (!p || !fs.existsSync(p)) return bad(res, 404, "Sauvegarde introuvable.");
+  res.set("Cache-Control", "no-store");
+  res.download(p, path.basename(p));
+});
+app.delete("/api/admin/backups", adminOnly, (req, res) => {
+  res.json({ ok: backups.remove(String(req.query.name || "")) });
+});
+
 app.get("/api/admin/update", adminOnly, async (req, res) => {
   try {
     if (req.query.refresh === "1" || !updater.check) await updater.checkNow();
@@ -1582,6 +1611,7 @@ async function main() {
   try { await repo.seedIfEmpty(); } catch (e) { console.error("[seed]", e.message); }
   try { lastHead = await repo.headSha(); } catch (_e) {}
   loadRecoveries(); // modifications non enregistrées lors de la dernière exécution
+  backups.start(); // une sauvegarde par jour (réglable dans Administration → Sauvegardes)
   if (!users.count()) console.log("[auth] aucun compte : le premier visiteur crée le compte administrateur.");
   server.listen(PORT, () => {
     console.log(`Easydoc ${pkg.version} — http://localhost:${PORT} — ${repo.mode === "github"

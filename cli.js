@@ -5,6 +5,7 @@
  *   node cli.js users                     liste des comptes
  *   node cli.js reset-password <login>    nouveau mot de passe (affiché), sessions fermées
  *   node cli.js create-admin <login>      crée un administrateur (mot de passe affiché)
+ *   node cli.js backup [fichier.tar.gz]   sauvegarde des données (comptes, droits, commentaires…)
  *
  * Le service n'a pas besoin d'être redémarré : il relit les comptes automatiquement.
  */
@@ -21,7 +22,8 @@ function usage(code = 1) {
   console.log(`Utilisation :
   node cli.js users                     liste des comptes
   node cli.js reset-password <login>    définit un nouveau mot de passe et l'affiche
-  node cli.js create-admin <login>      crée un compte administrateur`);
+  node cli.js create-admin <login>      crée un compte administrateur
+  node cli.js backup [fichier.tar.gz]   sauvegarde des données dans une archive (par défaut : data/backups/)`);
   process.exit(code);
 }
 
@@ -54,6 +56,21 @@ function usage(code = 1) {
     const password = auth.generatePassword();
     const u = await users.create({ username: login, displayName: login, password, role: "admin" });
     console.log(`Administrateur ${u.username} créé. Mot de passe : ${password}`);
+    return;
+  }
+
+  if (cmd === "backup") {
+    // le serveur peut tourner : les fichiers sont écrits de façon atomique ; une modification en cours
+    // d'enregistrement à cet instant sera dans la sauvegarde suivante
+    const { createBackup } = require("./src/backup");
+    const pkg = require("./package.json");
+    const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+    const dest = path.resolve(login || path.join(DATA_DIR, "backups",
+      `easydoc-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}.tar.gz`));
+    const r = await createBackup({ dataDir: DATA_DIR, localRepoDir: process.env.LOCAL_REPO_DIR || path.join(DATA_DIR, "localrepo"), dest,
+      meta: { version: pkg.version, motif: "ligne de commande" } });
+    console.log(`Sauvegarde : ${dest} (${r.files} fichiers, ${Math.round(r.bytes / 1024)} Ko)`);
+    console.log("Restaurer : arrêter Easydoc, puis  tar -xzf <archive> -C " + DATA_DIR + "  et relancer Easydoc.");
     return;
   }
 

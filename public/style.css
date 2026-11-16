@@ -381,7 +381,7 @@ body.dragging .dropzone { display: flex; }
 .auth-mode .app { visibility: hidden; }
 .auth-mode .modal { background: var(--bg-soft); backdrop-filter: none; }
 .modal-card.wide { width: 760px; }
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: -6px 0 2px; overflow-x: auto; }
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); margin: -6px 0 2px; }
 .tabs button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 8px 12px; color: var(--text-2);
   border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 550; cursor: pointer; white-space: nowrap; }
 .tabs button:hover { color: var(--text); }
@@ -627,3 +627,12 @@ details.tlogs pre { margin: 8px 0 0; max-height: 220px; overflow: auto; padding:
 .mv-name { display: flex; align-items: center; gap: 6px; }
 .mv-name .input { flex: 1; }
 .mv-ext { color: var(--muted); font-size: 13px; }
+
+/* ---- Sauvegardes ---- */
+.check-row { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13.5px; }
+.check-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.input.input-sm { display: inline-block; width: 64px; height: 28px; padding: 0 6px; margin: 0 4px; }
+.backup-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.backup-list li { display: flex; align-items: center; gap: 10px; padding: 4px 6px; border-radius: 6px; font-size: 13px; }
+.backup-list li:hover { background: var(--bg-hover); }
+.backup-list li span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12.5px; }

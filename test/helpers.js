@@ -77,8 +77,9 @@ function session(srv, cookie) {
  * Démarre un serveur Easydoc isolé (env : AUTOSAVE_MS, POLL_MS…).
  * Retourne { base, repoDir, dataDir, admin, member, login(), stop(), log }.
  */
-async function startServer(env = {}) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "easydoc-test-"));
+async function startServer(env = {}, opts = {}) {
+  // opts.dataDir + opts.password : démarrer sur des données existantes (restauration d'une sauvegarde)
+  const dataDir = opts.dataDir || fs.mkdtempSync(path.join(os.tmpdir(), "easydoc-test-"));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
@@ -95,9 +96,9 @@ async function startServer(env = {}) {
   const up = await waitFor(async () => (await fetch(base + "/api/health")).ok, { timeout: 20000 });
   if (!up) { child.kill(); throw new Error("Le serveur de test n'a pas démarré :\n" + log); }
 
-  const password = crypto.randomBytes(12).toString("base64url");
+  const password = opts.password || crypto.randomBytes(12).toString("base64url");
   const srv = {
-    base, port, dataDir, repoDir: path.join(dataDir, "localrepo"),
+    base, port, dataDir, repoDir: path.join(dataDir, "localrepo"), password,
     conns: new Set(), // connexions temps réel ouvertes par les tests
     get log() { return log; },
     async login(username) {
@@ -117,6 +118,11 @@ async function startServer(env = {}) {
       fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
   };
+  if (opts.dataDir) { // comptes déjà présents
+    srv.admin = await srv.login("admin-test");
+    srv.member = await srv.login("membre-test");
+    return srv;
+  }
   const setup = await fetch(base + "/api/auth/setup", {
     method: "POST", headers: { "Content-Type": "application/json", Origin: base },
     body: JSON.stringify({ username: "admin-test", displayName: "Admin Test", password, password2: password }),

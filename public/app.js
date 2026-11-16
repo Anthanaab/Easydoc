@@ -2201,7 +2201,7 @@ function genPassword() {
 }
 
 function openAdmin(tab = "users", opts = {}) {
-  const tabs = [["users", "Utilisateurs", "users"], ["access", "Droits d'accès", "lock"], ["repo", "Dépôt", "branch"], ["internet", "Accès Internet", "globe"], ["update", "Mise à jour", "download"]];
+  const tabs = [["users", "Utilisateurs", "users"], ["access", "Droits d'accès", "lock"], ["repo", "Dépôt", "branch"], ["internet", "Accès Internet", "globe"], ["backup", "Sauvegardes", "database"], ["update", "Mise à jour", "download"]];
   openModal({
     title: "Administration",
     wide: true,
@@ -2213,7 +2213,7 @@ function openAdmin(tab = "users", opts = {}) {
         const box = $("#tabBody", card);
         box.dataset.tab = k;
         box.innerHTML = '<div class="loadingview">Chargement…</div>';
-        const render = { users: renderUsersTab, access: renderAccessTab, repo: renderRepoTab, internet: renderInternetTab, update: renderUpdateTab }[k];
+        const render = { users: renderUsersTab, access: renderAccessTab, repo: renderRepoTab, internet: renderInternetTab, backup: renderBackupTab, update: renderUpdateTab }[k];
         render(box, o).catch((e) => { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
       };
       for (const b of $$(".tabs button", card)) b.onclick = () => show(b.dataset.tab);
@@ -2222,6 +2222,63 @@ function openAdmin(tab = "users", opts = {}) {
       show(tab, opts);
     },
   });
+}
+
+/* ---- Sauvegardes ---- */
+const dlBackup = (name) => {
+  const a = document.createElement("a");
+  a.href = `/api/admin/backups/download?name=${encodeURIComponent(name)}`;
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+async function renderBackupTab(box) {
+  const d = await api("GET", "/api/admin/backups");
+  if (!tabAlive(box, "backup")) return;
+  const when = (ts) => new Date(ts).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+  const last = d.list[0];
+  box.innerHTML = `
+    <p class="muted-sm">Une sauvegarde contient tout ce qui n'est pas dans le dépôt GitHub : comptes, droits d'accès,
+      commentaires, « qui a écrit quoi », réglages${d.mode === "local" ? "" : ""} et, en dépôt local, les documents eux-mêmes
+      avec leur historique. <strong>Elle contient aussi le jeton GitHub et les empreintes des mots de passe : range-la en lieu sûr.</strong></p>
+    <div class="card"><span class="tdot ${last && Date.now() - last.date < 26 * 3600 * 1000 ? "t-ok" : "t-busy"}"></span>
+      <div style="flex:1;min-width:0"><div class="t">${last ? `Dernière sauvegarde : ${esc(when(last.date))}` : "Aucune sauvegarde pour l'instant"}</div>
+      <div class="s">${d.list.length} sauvegarde${d.list.length > 1 ? "s" : ""} gardée${d.list.length > 1 ? "s" : ""} sur le serveur (${esc(d.dir)})</div></div>
+      <button class="btn btn-primary" data-act="now" ${d.running ? "disabled" : ""}>${svg("download")}Sauvegarder et télécharger</button></div>
+    ${d.lastError ? `<div class="msg err">Dernier échec : ${esc(d.lastError)}</div>` : ""}
+    <label class="check-row"><input type="checkbox" data-act="auto" ${d.auto ? "checked" : ""}>
+      <span>Sauvegarde automatique chaque jour, en gardant les
+      <input class="input input-sm" type="number" min="1" max="90" data-act="keep" value="${esc(d.keep)}"> dernières</span></label>
+    <div class="note">Pour ne rien perdre si le serveur lui-même disparaît, télécharge de temps en temps une sauvegarde
+      ailleurs (ou sauvegarde le conteneur avec Proxmox). <strong>Restaurer</strong> : arrêter Easydoc, puis
+      <code>tar -xzf easydoc-….tar.gz -C ${esc(d.dir.replace(/[\\/]backups$/, ""))}</code> et relancer Easydoc.</div>
+    <div class="msg"></div>
+    <ul class="backup-list">${d.list.map((b) => `<li><span>${esc(b.name)}</span><span class="muted-sm">${esc(when(b.date))} · ${fmtSize(b.size)}</span>
+      <button class="icon-btn sm" data-dl="${esc(b.name)}" title="Télécharger">${svg("download")}</button>
+      <button class="icon-btn sm" data-del="${esc(b.name)}" title="Supprimer">${svg("trash")}</button></li>`).join("")}</ul>`;
+  $('[data-act="now"]', box).onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.innerHTML = `${svg("refresh")}Sauvegarde en cours…`;
+    try {
+      const r = await api("POST", "/api/admin/backups");
+      dlBackup(r.name);
+      toast(`Sauvegarde créée : ${r.files} fichiers, ${fmtSize(r.bytes)}.`);
+    } catch (err) { toast(err.message, { error: true }); }
+    if (tabAlive(box, "backup")) renderBackupTab(box);
+  };
+  const saveSettings = async () => {
+    const keep = Number($('[data-act="keep"]', box).value);
+    try { await api("PUT", "/api/admin/backups", { auto: $('[data-act="auto"]', box).checked, keep }); toast("Réglage enregistré."); }
+    catch (err) { setMsg(box, err.message, "err"); }
+    if (tabAlive(box, "backup")) renderBackupTab(box);
+  };
+  $('[data-act="auto"]', box).onchange = saveSettings;
+  $('[data-act="keep"]', box).onchange = saveSettings;
+  for (const b of $$("[data-dl]", box)) b.onclick = () => dlBackup(b.dataset.dl);
+  for (const b of $$("[data-del]", box)) b.onclick = async () => {
+    if (!confirm(`Supprimer la sauvegarde ${b.dataset.del} ?`)) return;
+    await api("DELETE", `/api/admin/backups?name=${encodeURIComponent(b.dataset.del)}`).catch((err) => toast(err.message, { error: true }));
+    renderBackupTab(box);
+  };
 }
 
 /* ---- Utilisateurs ---- */
