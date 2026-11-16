@@ -40,7 +40,21 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Tests
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+
+      # Les journaux ne sont visibles qu'aux personnes connectées : les échecs sont aussi publiés en
+      # annotations (lisibles par tous, y compris par l'API publique de GitHub).
+      - name: Résumé des échecs
+        if: failure()
+        shell: bash
+        run: |
+          [ -f test-output.txt ] || exit 0
+          grep -nE "✖|not ok|Error|expected|actual|message:|at .*\.js:[0-9]+" test-output.txt | head -60 > echecs.txt || true
+          echo "::error title=Tests en échec (${{ matrix.os }}, Node ${{ matrix.node }})::$(sed -e 's/%/%25/g' echecs.txt | sed ':a;N;$!ba;s/\n/%0A/g')"
+          { echo '### Tests en échec'; echo '```'; cat echecs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # Le fichier construit est versionné (les serveurs ne le reconstruisent pas) : il doit
       # correspondre exactement aux sources de client/. Sinon : « npm run build » a été oublié.

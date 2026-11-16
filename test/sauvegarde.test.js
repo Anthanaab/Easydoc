@@ -47,7 +47,8 @@ test("sauvegarde", async (t) => {
   });
 
   await t.test("l'archive se relit avec tar et contient ce qu'il faut (sans le superflu)", async () => {
-    const names = execFileSync("tar", ["-tzf", archive], { cwd: path.dirname(archive) }).toString().split(/\r?\n/).filter(Boolean);
+    // nom seul (pas « C:\… ») : le tar GNU de Git pour Windows prendrait « C: » pour une machine distante
+    const names = execFileSync("tar", ["-tzf", path.basename(archive)], { cwd: path.dirname(archive) }).toString().split(/\r?\n/).filter(Boolean);
     for (const n of ["users.json", "access.json", "comments.json", "localrepo/.git/HEAD"]) assert.ok(names.includes(n), `${n} présent`);
     assert.ok(names.some((n) => n.startsWith("localrepo/notes/")), "documents du dépôt local présents");
     assert.ok(!names.some((n) => n.startsWith("bin/") || n.startsWith("backups/")), "programme et anciennes sauvegardes exclus");
