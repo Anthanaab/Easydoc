@@ -65,6 +65,7 @@ const ICONS = {
   list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
   comment: '<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5Z"/>',
+  more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
 };
 const svg = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 function hydrateIcons(root = document) {
@@ -1424,7 +1425,7 @@ function renderStatus() {
   }
   el.textContent = text;
   el.dataset.tone = tone;
-  el.title = title;
+  el.title = title || text; // sur écran étroit, seule la pastille de couleur reste visible
 }
 setInterval(renderStatus, 10000);
 
@@ -2599,6 +2600,54 @@ $("#btnAuthors").onclick = () => toggleAuthors();
 $("#btnHistory").onclick = openHistory;
 $("#btnTheme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
+
+/* ---- Menu « ⋯ » : actions secondaires de la barre d'outils quand la place manque ---- */
+const MORE_LABELS = {
+  btnCopyLink: "Copier le lien", btnToc: "Table des matières", btnAuthors: "Qui a écrit quoi",
+  btnHistory: "Historique", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
+};
+let moreMenu = null;
+function closeMoreMenu() {
+  if (!moreMenu) return;
+  moreMenu.remove(); moreMenu = null;
+  $("#btnMore").setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", onMoreOutside, true);
+}
+function onMoreOutside(e) { if (moreMenu && !moreMenu.contains(e.target) && !e.target.closest("#btnMore")) closeMoreMenu(); }
+function openMoreMenu() {
+  // les boutons repliés dans le menu, dans leur état actuel (cachés, désactivés, activés)
+  const items = $$(".topbar .tb-more-item").filter((b) => !b.hidden && b.style.display !== "none");
+  if (!items.length) return;
+  moreMenu = document.createElement("div");
+  moreMenu.className = "tb-menu";
+  moreMenu.setAttribute("role", "menu");
+  moreMenu.innerHTML = items.map((b) => {
+    const on = b.getAttribute("aria-pressed") === "true" || b.classList.contains("on");
+    return `<button role="menuitem" data-for="${b.id}"${b.disabled ? " disabled" : ""}${b.id === "btnDelete" ? ' class="danger"' : ""}>${b.querySelector("svg").outerHTML}<span>${esc(MORE_LABELS[b.id] || b.title)}</span>${on ? svg("check", "tick") : ""}</button>`;
+  }).join("");
+  document.body.appendChild(moreMenu);
+  const r = $("#btnMore").getBoundingClientRect();
+  moreMenu.style.top = r.bottom + 6 + "px";
+  moreMenu.style.right = Math.max(8, innerWidth - r.right) + "px";
+  $("#btnMore").setAttribute("aria-expanded", "true");
+  for (const it of $$("button", moreMenu)) it.onclick = () => { const b = $("#" + it.dataset.for); closeMoreMenu(); if (b && !b.disabled) b.click(); };
+  document.addEventListener("pointerdown", onMoreOutside, true);
+  const first = $("button:not([disabled])", moreMenu);
+  if (first) first.focus();
+}
+$("#btnMore").onclick = () => (moreMenu ? closeMoreMenu() : openMoreMenu());
+window.addEventListener("keydown", (e) => {
+  if (!moreMenu) return;
+  if (e.key === "Escape") { closeMoreMenu(); $("#btnMore").focus(); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const list = $$("button:not([disabled])", moreMenu);
+    const k = list.indexOf(document.activeElement);
+    const next = list[(k + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length];
+    if (next) next.focus();
+  }
+});
+window.addEventListener("resize", closeMoreMenu);
 $("#scrim").onclick = () => $("#app").classList.remove("nav-open");
 $("#search").addEventListener("input", renderTree);
 $("#search").addEventListener("keydown", (e) => {
