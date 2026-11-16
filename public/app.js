@@ -446,6 +446,7 @@ function setArea(state, kind = "") { area.dataset.state = state; area.dataset.ki
 const ED = createEditor(edHost, {
   marks: (from, to) => editorMarks(from, to),
   onUpdate: (u, local) => onEditorUpdate(u, local),
+  onFiles: (files, pos) => insertFiles(files, pos), // image collée
   resolveImage(src) {
     if (!S || /^[a-z][a-z0-9+.-]*:/i.test(src)) return src;
     const t = resolveRel(src, S.path);
@@ -823,7 +824,8 @@ function convertFile(path) {
 let config = {};
 const currentFolder = () => (currentPath() ? dirName(currentPath()) : "");
 function cleanName(name) {
-  let n = name.normalize("NFC").replace(/[^\p{L}\p{N} _.()&+,'@[\]!~=-]/gu, "-").replace(/-{2,}/g, "-").replace(/^[.\s-]+/, "").trim();
+  let n = name.normalize("NFC").replace(/[^\p{L}\p{N} _.()&+,'@[\]!~=-]/gu, "-").replace(/~(?=\d)/g, "-")
+    .replace(/-{2,}/g, "-").replace(/^[.\s-]+/, "").replace(/[.\s]+$/, "").trim();
   if (!n) n = "fichier";
   return n.slice(0, 120);
 }
@@ -862,27 +864,114 @@ const fileInput = $("#fileInput");
 const pickFiles = () => fileInput.click();
 fileInput.addEventListener("change", () => { uploadFiles(fileInput.files); fileInput.value = ""; });
 
+/* ---- Images et fichiers insérés dans le texte (coller, glisser-déposer sur le document) ---- */
+// Une image va dans le dossier « <document> - images » à côté du document, un autre fichier dans le
+// dossier du document ; un lien relatif est inséré à l'endroit voulu (image affichée dans le texte).
+const pad2 = (n) => String(n).padStart(2, "0");
+const canInsertFiles = () => !!(S && S.loaded && S.kind === "markdown" && !S.offline && !ED.readOnly);
+function insertedName(f) {
+  const ext = (String(f.type).split("/")[1] || "png").replace("jpeg", "jpg").replace("svg+xml", "svg").replace(/[^a-z0-9]/gi, "") || "png";
+  // capture d'écran collée (« image.png ») : nommée d'après la date ; sinon le nom du fichier
+  if (f.name && !/^image\.\w+$/i.test(f.name)) return cleanName(f.name);
+  const d = new Date();
+  return `capture ${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}h${pad2(d.getMinutes())}m${pad2(d.getSeconds())}.${ext}`;
+}
+/** Lien relatif (encodé pour le Markdown) du dossier du document vers un fichier du dépôt. */
+function relLink(fromDoc, target) {
+  const a = dirName(fromDoc) ? dirName(fromDoc).split("/") : [];
+  const b = target.split("/");
+  let i = 0;
+  while (i < a.length && i < b.length - 1 && a[i] === b[i]) i++;
+  const enc = (s) => encodeURIComponent(s).replace(/\(/g, "%28").replace(/\)/g, "%29");
+  return [...a.slice(i).map(() => ".."), ...b.slice(i).map(enc)].join("/");
+}
+async function insertFiles(files, pos) {
+  const s = S;
+  const list = [...files].filter((f) => f && f.size !== undefined);
+  if (!list.length || !canInsertFiles()) return;
+  const maxMB = config.maxUploadMB || 25;
+  const stem = displayName(s.path);
+  const dir = dirName(s.path);
+  const jobs = [];
+  for (const f of list) {
+    if (f.size > maxMB * 1048576) { toast(`« ${f.name || "image"} » dépasse ${maxMB} Mo : non inséré.`, { error: true }); continue; }
+    const name = insertedName(f);
+    const image = /^image\//.test(f.type);
+    // repère visible le temps de l'envoi (unique : remplacé par le lien, même si le texte a bougé)
+    jobs.push({ f, name, image, token: `⟦envoi de « ${name} »… ${Math.random().toString(36).slice(2, 7)}⟧` });
+  }
+  if (!jobs.length) return;
+  let at = pos == null ? ED.selection.head : pos;
+  let lead = "";
+  if (pos != null) {
+    // déposé sur une ligne : inséré sur une nouvelle ligne juste en dessous, sans couper un mot
+    const ln = ED.lineAt(pos);
+    at = ln.to;
+    if (ln.text.trim()) lead = "\n";
+  }
+  ED.insertAt(at, lead + jobs.map((j) => j.token).join("\n"));
+  let done = 0;
+  for (const j of jobs) {
+    const folder = j.image ? [dir, `${stem} - images`].filter(Boolean).join("/") : dir;
+    const want = folder ? `${folder}/${j.name}` : j.name;
+    try {
+      const r = await fetch(`/api/upload?path=${encodeURIComponent(want)}`, {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: j.f,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || `erreur ${r.status}`);
+      const alt = fileName(d.path).replace(/\.[^.]+$/, "").replace(/[[\]]/g, "");
+      const md = j.image ? `![${alt}](${relLink(s.path, d.path)})` : `[${fileName(d.path).replace(/[[\]]/g, "")}](${relLink(s.path, d.path)})`;
+      if (S === s) ED.replaceText(j.token, md);
+      done++;
+    } catch (e) {
+      if (S === s) ED.replaceText(j.token, "");
+      toast(`Échec de l'envoi de « ${j.name} » : ${e.message}`, { error: true });
+    }
+  }
+  if (done) { refreshTree(); toast(done > 1 ? `${done} fichiers insérés dans le document.` : jobs[0].image ? "Image insérée." : "Fichier inséré."); }
+}
+
 let dragDepth = 0;
 const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+/** Le pointeur est-il au-dessus du texte du document (dépôt = insertion à cet endroit) ? */
+function overEditor(e) {
+  if (!canInsertFiles()) return false;
+  const r = paneEditor.getBoundingClientRect();
+  return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+}
+function dropText(e) {
+  if (overEditor(e)) return "Dépose ici pour insérer dans le document";
+  const folder = currentFolder();
+  return folder ? `Dépose tes fichiers pour les importer dans « ${folder} »` : "Dépose tes fichiers pour les importer";
+}
 window.addEventListener("dragenter", (e) => {
   if (!hasFiles(e)) return;
   e.preventDefault();
   dragDepth++;
-  const folder = currentFolder();
-  $("#dropzoneText").textContent = folder ? `Dépose tes fichiers pour les importer dans « ${folder} »` : "Dépose tes fichiers pour les importer";
+  $("#dropzoneText").textContent = dropText(e);
   document.body.classList.add("dragging");
 });
-window.addEventListener("dragover", (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+window.addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  const t = dropText(e);
+  if ($("#dropzoneText").textContent !== t) $("#dropzoneText").textContent = t;
+  document.body.classList.toggle("drop-insert", overEditor(e));
+});
 window.addEventListener("dragleave", (e) => {
   if (!hasFiles(e)) return;
   dragDepth = Math.max(0, dragDepth - 1);
-  if (!dragDepth) document.body.classList.remove("dragging");
+  if (!dragDepth) document.body.classList.remove("dragging", "drop-insert");
 });
 window.addEventListener("drop", (e) => {
   if (!hasFiles(e)) return;
   e.preventDefault();
   dragDepth = 0;
-  document.body.classList.remove("dragging");
+  document.body.classList.remove("dragging", "drop-insert");
+  // déposé sur le texte : inséré à l'endroit du dépôt
+  if (overEditor(e)) { insertFiles(e.dataTransfer.files, ED.posAtCoords(e.clientX, e.clientY)); return; }
   // déposé sur un dossier de la liste : import dans ce dossier
   const dirRow = e.target.closest && e.target.closest(".node.folder");
   uploadFiles(e.dataTransfer.files, dirRow ? dirRow.dataset.dir : currentFolder());

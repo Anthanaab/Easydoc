@@ -44,6 +44,10 @@ en train d'être tapé.
   `Ctrl+Maj+7/8/9`, `Ctrl+E`. `Entrée` continue une liste. Les fichiers restent du Markdown standard.
 - Sommaire flottant (titres du document), liens entre documents (`Ctrl+clic`), thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
+- **Images dans le texte** : colle une capture d'écran (`Ctrl+V`) ou glisse une image sur le document :
+  elle est enregistrée dans le dossier « *nom du document* - images » et s'affiche à cet endroit.
+  Un autre fichier glissé sur le texte (PDF, tableur…) est importé à côté du document et un lien
+  vers lui est inséré.
 - **Autres fichiers** : import par bouton ou glisser-déposer (25 Mo max par fichier). Les PDF et les
   images s'affichent dans la page, les fichiers Word (.docx) en aperçu, les autres (Excel, PowerPoint…)
   se téléchargent. Un Word ou un PDF peut être transformé en **version modifiable** (document

@@ -364,6 +364,20 @@ export function createEditor(parent, hooks) {
         hooks.onUpdate(u, local);
       }),
       EditorView.domEventHandlers({
+        // capture d'écran ou fichier collé : envoyé au dépôt puis inséré dans le texte
+        paste(e, view) {
+          const files = e.clipboardData ? [...e.clipboardData.files] : [];
+          if (!files.length || !hooks.onFiles || view.state.readOnly) return false;
+          e.preventDefault();
+          hooks.onFiles(files, null);
+          return true;
+        },
+        // fichier déposé : géré par l'application (envoi puis lien), jamais inséré tel quel en texte
+        drop(e) {
+          if (!e.dataTransfer || !e.dataTransfer.files.length) return false;
+          e.preventDefault();
+          return true;
+        },
         mousedown(e, view) {
           const a = e.target.closest && e.target.closest(".cm-link");
           if (a && (e.ctrlKey || e.metaKey || view.state.readOnly)) {
@@ -433,6 +447,20 @@ export function createEditor(parent, hooks) {
       return view.documentTop + view.lineBlockAt(p).top;
     },
     lineAt(pos) { return view.state.doc.lineAt(pos); },
+    /** Position du texte sous un point de l'écran (glisser-déposer), ou null. */
+    posAtCoords(x, y) { return view.posAtCoords({ x, y }); },
+    /** Insère du texte à une position et place le curseur après. */
+    insertAt(pos, text) {
+      const p = Math.max(0, Math.min(pos, view.state.doc.length));
+      view.dispatch({ changes: { from: p, insert: text }, selection: { anchor: p + text.length }, scrollIntoView: true, userEvent: "input" });
+    },
+    /** Remplace la première occurrence d'un texte (repère d'envoi en cours) ; faux s'il a disparu. */
+    replaceText(find, text) {
+      const i = view.state.doc.toString().indexOf(find);
+      if (i < 0) return false;
+      view.dispatch({ changes: { from: i, to: i + find.length, insert: text }, userEvent: "input" });
+      return true;
+    },
     /** Position du début de la ligne n (numérotée à partir de 1). */
     lineStart(n) { const d = view.state.doc; return d.line(Math.max(1, Math.min(n || 1, d.lines))).from; },
     format(name) { const f = FORMATS[name]; return f ? f(view) : false; },
