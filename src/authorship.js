@@ -64,9 +64,19 @@ function applyFineDiff(ytext, newValue, attrs) {
 function merge3(base, mine, theirs) {
   if (mine === base || mine === theirs) return theirs;
   if (theirs === base) return mine;
-  const patch = Diff.structuredPatch("base", "mine", base, mine, "", "", { context: 1 });
-  const out = Diff.applyPatch(theirs, patch);
-  return out === false ? null : out;
+  // fins de ligne Windows (CRLF) : la fusion se fait en LF, puis le fichier garde ses fins de ligne
+  const crlf = /\r\n/.test(theirs);
+  const lf = (t) => t.replace(/\r\n/g, "\n");
+  let out = Diff.applyPatch(lf(theirs), Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 1 }));
+  if (out === false) {
+    // lignes voisines modifiées des deux côtés : nouvel essai sans contexte, seulement si chaque
+    // modification remplace une ligne (repérée par son contenu) ; une simple insertion sans repère
+    // pourrait tomber au mauvais endroit
+    const p0 = Diff.structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 0 });
+    if (p0.hunks.every((h) => h.lines.some((l) => l[0] === "-"))) out = Diff.applyPatch(lf(theirs), p0);
+  }
+  if (out === false) return null;
+  return crlf ? out.replace(/\n/g, "\r\n") : out;
 }
 
 /** Délimitation compacte d'un Y.Text : [[longueur, auteur, minute], …]. */

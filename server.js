@@ -301,12 +301,16 @@ async function mergeExternal(name, doc, newContent) {
   }
   const who = steps[steps.length - 1];
   const ytext = doc.getText(TEXT);
+  // L'état de référence doit toujours correspondre exactement au texte du dépôt (lastRemote) :
+  // s'il contenait la saisie pas encore enregistrée, la fusion suivante l'effacerait.
+  let base = null;
   if (s.baseUpdate) {
     const tmp = new Y.Doc();
     Y.applyUpdate(tmp, s.baseUpdate);
     const before = Y.encodeStateVector(tmp);
     tmp.transact(() => { for (const x of steps) authorship.applyFineDiff(tmp.getText(TEXT), x.text, x.a ? { a: x.a, t: x.t } : {}); });
     Y.applyUpdate(doc, Y.encodeStateAsUpdate(tmp, before), SERVER);
+    base = Y.encodeStateAsUpdate(tmp); // = la nouvelle version du dépôt, sans la saisie locale
     tmp.destroy();
   } else {
     // pas d'état de référence (ne devrait pas arriver) : fusion du texte ligne à ligne
@@ -317,7 +321,8 @@ async function mergeExternal(name, doc, newContent) {
   }
   s.lastRemote = newContent;
   s.lastCommitted = newContent;
-  s.baseUpdate = Y.encodeStateAsUpdate(doc);
+  s.baseUpdate = base; // sans état exact : la prochaine fusion se fera ligne à ligne
+  if (!base && ytext.toString() === newContent) s.baseUpdate = Y.encodeStateAsUpdate(doc);
   if (ytext.toString() !== newContent) { // il reste de la saisie locale à enregistrer
     s.dirty = true; s.firstDirty = s.firstDirty || Date.now();
   }
@@ -1299,6 +1304,9 @@ app.delete("/api/file", async (req, res) => {
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
     }
     comments.clearPath(p);
+    // un secours en attente recréerait le document supprimé au prochain redémarrage
+    dropRecovery(p);
+    try { fs.unlinkSync(recoveryFile(p)); } catch (_e) {}
     states.delete(p); // l'annexe des auteurs est conservée : si le fichier est remis, son texte retrouve ses auteurs
     bump("treeVersion");
     res.json({ ok: true, deleted: r.deleted });

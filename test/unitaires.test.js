@@ -33,6 +33,13 @@ test("fusion à trois voies : lignes différentes fusionnées, mêmes lignes en 
   assert.equal(merge3(base, base.replace("l2", "moi"), base.replace("l2", "autre")), null);
   assert.equal(merge3(base, "intro\n" + base, base + "fin\n"), "intro\n" + base + "fin\n");
   assert.equal(merge3(base, base, "autre"), "autre");
+  // lignes voisines (j'ajoute une phrase à la ligne 3, l'autre modifie la ligne 2) : fusionnées
+  assert.equal(merge3(base, base.replace("l3", "l3 et ma phrase"), base.replace("l2", "L2 (autre)")), "l1\nL2 (autre)\nl3 et ma phrase\nl4\nl5\nl6\nl7\n");
+  // insertion sans repère près d'une ligne modifiée par l'autre : conflit plutôt qu'un mauvais endroit
+  assert.equal(merge3("a\nb\n", "a\nnouveau\nb\n", "A\nb\n"), null);
+  // fichier en fins de ligne Windows : fusion possible, fins de ligne conservées
+  const crlf = base.replace(/\n/g, "\r\n");
+  assert.equal(merge3(crlf, crlf.replace("l2", "moi"), crlf.replace("l6", "autre")), "l1\r\nmoi\r\nl3\r\nl4\r\nl5\r\nautre\r\nl7\r\n");
 });
 
 test("comparaison de textes : limitée dans le temps sur deux très longs textes", () => {
@@ -63,12 +70,12 @@ test("feuille de style : pas de sélecteur orphelin ni d'accolade manquante", ()
 });
 
 test("chemins : noms dangereux refusés, noms ordinaires acceptés", () => {
-  for (const bad of ["../x.md", "a/../../x.md", "C:/Windows/win.ini", ".git/config", "a/.env", "Interne./a.md", "Interne /a.md", "INTERN~1/a.md", "-A", "notes/-x.md", "a\0b.md"]) {
+  for (const bad of ["../x.md", "a/../../x.md", "C:/Windows/win.ini", ".git/config", "a/.env", "Interne./a.md", "Interne /a.md", "INTERN~1/a.md", "PROGRA~2.MD", "-A", "notes/-x.md", "a\0b.md"]) {
     assert.equal(safeFilePath(bad), null, bad);
   }
   // un chemin « absolu » reste à l'intérieur du dépôt
   assert.equal(safeFilePath("/etc/passwd"), "etc/passwd");
-  for (const ok of ["notes/a.md", "Notes de réunion/compte rendu (v2).md", "images/capture 2026-11-16 12h23m52.png"]) {
+  for (const ok of ["notes/a.md", "Notes de réunion/compte rendu (v2).md", "images/capture 2026-11-16 12h23m52.png", "Budget~2024.md", "rapport~v2.md"]) {
     assert.equal(safeFilePath(ok), ok);
   }
   assert.equal(safeDocPath("notes/image.png"), null);

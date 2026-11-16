@@ -14,7 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const { Octokit } = require("@octokit/rest");
 const { simpleGit } = require("simple-git");
-const { isHidden } = require("./paths");
+const { isHidden, safeFilePath } = require("./paths");
 
 const toBuf = (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), "utf8"));
 
@@ -59,12 +59,16 @@ class RepoService {
     if (full !== root && !full.startsWith(root + path.sep)) throw new Error("chemin refusé");
     // un lien symbolique placé dans le dépôt (par un agent, une copie…) ne doit pas mener
     // ailleurs sur le serveur (data/config.json contient le jeton GitHub)
+    // lstat : un lien qui pointe vers un fichier inexistant compte aussi (existsSync le suivrait et dirait « absent »)
+    const present = (p) => { try { fs.lstatSync(p); return true; } catch (_e) { return false; } };
     let real = full;
-    while (!fs.existsSync(real) && real !== root) real = path.dirname(real); // fichier pas encore créé
-    if (fs.existsSync(real)) {
+    while (!present(real) && real !== root) real = path.dirname(real); // fichier pas encore créé
+    if (present(real)) {
+      const refuse = () => { throw new Error("chemin refusé (lien vers l'extérieur du dépôt)"); };
       const realRoot = fs.realpathSync.native(root);
-      const r = fs.realpathSync.native(real);
-      if (r !== realRoot && !r.startsWith(realRoot + path.sep)) throw new Error("chemin refusé (lien vers l'extérieur du dépôt)");
+      let r;
+      try { r = fs.realpathSync.native(real); } catch (_e) { refuse(); } // lien vers une cible absente
+      if (r !== realRoot && !r.startsWith(realRoot + path.sep)) refuse();
     }
     return full;
   }
@@ -73,9 +77,14 @@ class RepoService {
   caseInsensitive() {
     if (this.mode !== "local") return false;
     if (this._ciCache === undefined) {
+      // test À L'INTÉRIEUR du dépôt (son dossier .git) : le dépôt peut être sur un disque différent
+      // de ses dossiers parents (montage Docker depuis un Mac ou Windows, partage réseau…)
       const root = path.resolve(this.options.localRepoDir);
-      try { this._ciCache = fs.existsSync(root.toUpperCase()) && fs.existsSync(root.toLowerCase()); }
-      catch (_e) { this._ciCache = process.platform === "win32" || process.platform === "darwin"; }
+      try {
+        const a = fs.statSync(path.join(root, ".git"));
+        const b = fs.statSync(path.join(root, ".GIT"), { throwIfNoEntry: false });
+        this._ciCache = !!b && a.ino === b.ino && a.dev === b.dev;
+      } catch (_e) { this._ciCache = process.platform === "win32" || process.platform === "darwin"; }
     }
     return this._ciCache;
   }
@@ -122,7 +131,8 @@ class RepoService {
           owner, repo, tree_sha: this.options.githubBranch, recursive: "1",
         });
         return (data.tree || [])
-          .filter((t) => t.type === "blob" && !isHidden(t.path))
+          // noms refusés par Easydoc (impossibles à ouvrir) : non listés
+          .filter((t) => t.type === "blob" && !isHidden(t.path) && safeFilePath(t.path) === t.path)
           .map((t) => ({ path: t.path, size: t.size || 0, sha: t.sha })); // sha : contenu inchangé = même sha
       } catch (e) {
         if (e.status === 404 || e.status === 409) return []; // dépôt vide / branche absente
@@ -136,7 +146,7 @@ class RepoService {
         const full = path.join(dir, ent.name);
         const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
         if (ent.isDirectory()) walk(full, rel);
-        else if (ent.isFile()) out.push({ path: rel, size: fs.statSync(full).size });
+        else if (ent.isFile() && safeFilePath(rel) === rel) out.push({ path: rel, size: fs.statSync(full).size });
       }
     };
     walk(this.options.localRepoDir, "");

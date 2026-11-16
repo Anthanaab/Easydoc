@@ -12,6 +12,8 @@ const path = require("path");
 const MAX_LEN = 300;
 const SEGMENT = /^[\p{L}\p{N} _.()&+,'@[\]!~=-]+$/u;
 const EDITABLE = /\.(md|markdown|txt)$/i;
+// nom court Windows (8.3) : « INTERN~1 », « PROGRA~2.MD » — mais pas « Budget~2024.md »
+const SHORT_NAME = /^(?=[^.]{1,8}(\.|$))[^~.]{1,6}~\d+(\.[^.]{0,3})?$/i; // partie avant le point : 8 caractères au plus
 
 const KINDS = {
   markdown: ["md", "markdown"],
@@ -39,7 +41,7 @@ function safeFilePath(input) {
     if (!SEGMENT.test(seg)) return null;
     // Windows ignore un point ou un espace final et accepte les noms courts « INTERN~1 » :
     // ce seraient d'autres noms pour un même fichier, qui échapperaient à ses droits d'accès.
-    if (/[. ]$/.test(seg) || /~\d/.test(seg)) return null;
+    if (/[. ]$/.test(seg) || SHORT_NAME.test(seg)) return null;
     if (seg.startsWith("-")) return null; // jamais lu comme une option par git
   }
   return norm;

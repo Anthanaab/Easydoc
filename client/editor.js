@@ -17,6 +17,17 @@ import { markdownLanguage, markdownKeymap } from "@codemirror/lang-markdown";
 import { tags } from "@lezer/highlight";
 import { yCollab, yUndoManagerKeymap, ySyncAnnotation } from "y-codemirror.next";
 import { diffChars } from "diff";
+import { search, searchKeymap, openSearchPanel, highlightSelectionMatches } from "@codemirror/search";
+
+/* Recherche dans le document (Ctrl+F) : l'éditeur n'affiche que les lignes visibles, la recherche du
+   navigateur ne verrait pas le reste d'un long document. Panneau en français. */
+const PHRASES_FR = EditorState.phrases.of({
+  "Find": "Rechercher", "Replace": "Remplacer par", "next": "suivant", "previous": "précédent", "all": "tout",
+  "match case": "respecter la casse", "regexp": "expression régulière", "by word": "mot entier",
+  "replace": "remplacer", "replace all": "tout remplacer", "close": "fermer",
+  "current match": "résultat actuel", "on line": "à la ligne", "Go to line": "Aller à la ligne", "go": "aller",
+  "replaced $ matches": "$ remplacements", "replaced match on line $": "remplacement à la ligne $",
+});
 
 /** Redessine les surlignages fournis par l'application (auteurs, commentaires). */
 const refreshEffect = StateEffect.define();
@@ -340,6 +351,7 @@ const formatKeymap = [
 export function createEditor(parent, hooks) {
   const readOnlyComp = new Compartment();
   const placeholderComp = new Compartment();
+  const tracked = new Set(); // positions suivies à travers les modifications (insertion différée)
   let mode = { kind: "markdown", collab: false };
 
   function extensions({ kind, ytext, awareness, undoManager, readOnly, placeholder }) {
@@ -353,23 +365,29 @@ export function createEditor(parent, hooks) {
       placeholderComp.of(cmPlaceholder(placeholder || "")),
       EditorView.lineWrapping,
       Prec.high(keymap.of([...(md ? formatKeymap : []), ...(md ? markdownKeymap : [])])),
-      keymap.of([...(collab ? yUndoManagerKeymap : historyKeymap), indentWithTab, ...defaultKeymap]),
+      keymap.of([...(collab ? yUndoManagerKeymap : historyKeymap), ...searchKeymap, indentWithTab, ...defaultKeymap]),
+      search({ top: true }), PHRASES_FR, highlightSelectionMatches(),
       collab ? yCollab(ytext, awareness, { undoManager }) : history(),
       md ? [new LanguageSupport(markdownLanguage), livePreview(hooks), syntaxHighlighting(mdHighlight)] : [],
       appMarks(hooks),
       EditorView.editorAttributes.of({ class: md ? "cm-md" : "cm-plain" }),
       EditorView.contentAttributes.of({ spellcheck: "true", autocorrect: "on", autocapitalize: "sentences", "aria-label": "Contenu du document" }),
       EditorView.updateListener.of((u) => {
+        if (u.docChanged) for (const t of tracked) t.pos = u.changes.mapPos(t.pos, 1); // positions suivies
         const local = u.transactions.some((t) => t.docChanged && !t.annotation(ySyncAnnotation));
         hooks.onUpdate(u, local);
       }),
       EditorView.domEventHandlers({
         // capture d'écran ou fichier collé : envoyé au dépôt puis inséré dans le texte
         paste(e, view) {
-          const files = e.clipboardData ? [...e.clipboardData.files] : [];
+          const cd = e.clipboardData;
+          const files = cd ? [...cd.files] : [];
           if (!files.length || !hooks.onFiles || view.state.readOnly) return false;
+          // Word, LibreOffice… joignent une image du passage copié : c'est le texte qu'on veut alors
+          const types = [...(cd.types || [])];
+          if (types.includes("text/plain") || types.includes("text/html")) return false;
+          if (!hooks.onFiles(files, null)) return false; // insertion impossible ici : collage normal
           e.preventDefault();
-          hooks.onFiles(files, null);
           return true;
         },
         // fichier déposé : géré par l'application (envoi puis lien), jamais inséré tel quel en texte
@@ -454,6 +472,11 @@ export function createEditor(parent, hooks) {
       return view.documentTop + view.lineBlockAt(p).top;
     },
     lineAt(pos) { return view.state.doc.lineAt(pos); },
+    /** Suit une position pendant que le texte change (le sien et celui des autres) : { pos }. */
+    track(pos) { const t = { pos }; tracked.add(t); return t; },
+    untrack(t) { tracked.delete(t); },
+    /** Ouvre la recherche dans le document (Ctrl+F). */
+    openSearch() { view.focus(); return openSearchPanel(view); },
     /** Position du texte sous un point de l'écran (glisser-déposer), ou null. */
     posAtCoords(x, y) { return view.posAtCoords({ x, y }); },
     /** Insère du texte à une position et place le curseur après. */

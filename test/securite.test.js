@@ -56,6 +56,17 @@ test("sécurité", async (t) => {
     assert.ok(write.status >= 400 && !fs.existsSync(path.join(srv.dataDir, "pirate.txt")), `écriture : ${write.status}`);
   });
 
+  await t.test("liens : un lien vers un fichier inexistant hors du dépôt ne permet pas de le créer", async () => {
+    const outside = path.join(srv.dataDir, "cree-hors-depot.txt");
+    const link = path.join(srv.repoDir, "notes", "lien-casse.md");
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    try { fs.symlinkSync(outside, link, "file"); } catch (e) { t.skip("lien impossible à créer ici : " + e.message); return; }
+    const w = await member.upload("notes/lien-casse.md", Buffer.from("piratage"), true);
+    assert.ok(w.status >= 400, `écriture : ${w.status}`);
+    assert.ok(!fs.existsSync(outside), "aucun fichier créé hors du dépôt");
+    fs.unlinkSync(link);
+  });
+
   await t.test("origine : une requête d'un autre site est refusée, même avec X-Forwarded-Host", async () => {
     const r = await member.post("/api/sync", undefined, { Origin: "http://evil.example", "X-Forwarded-Host": "evil.example" });
     assert.equal(r.status, 403);

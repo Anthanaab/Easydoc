@@ -543,7 +543,7 @@ function setArea(state, kind = "") { area.dataset.state = state; area.dataset.ki
 const ED = createEditor(edHost, {
   marks: (from, to) => editorMarks(from, to),
   onUpdate: (u, local) => onEditorUpdate(u, local),
-  onFiles: (files, pos) => insertFiles(files, pos), // image collée
+  onFiles: (files, pos) => { if (!canInsertFiles()) return false; insertFiles(files, pos); return true; }, // image collée
   resolveImage(src) {
     if (!S || /^[a-z][a-z0-9+.-]*:/i.test(src)) return src;
     const t = resolveRel(src, S.path);
@@ -568,7 +568,7 @@ function onEditorUpdate(u, local) {
       s.lastLocalEdit = Date.now(); s.dirty = true;
       if (s.offline) { clearTimeout(s.offlineTimer); s.offlineTimer = setTimeout(() => saveNow(false), 3000); }
       renderStatus();
-    }
+    } else if (!local && !s.dirty) s.confirmedText = ED.text; // modification des autres, rien d'à nous en attente
     scheduleToc();
   }
   if (u.docChanged || u.selectionSet) publishLine();
@@ -682,7 +682,10 @@ function openFile(path, opts = {}) {
     if (S !== s) return;
     const keys = event.keysChanged;
     if (s.meta.get("loaded") && !s.loaded) onLoaded(s);
-    if (keys.has("savedAt")) { s.savedSeen = Date.now(); if (s.lastLocalEdit <= s.savedSeen) s.dirty = false; }
+    if (keys.has("savedAt")) {
+      s.savedSeen = Date.now();
+      if (s.lastLocalEdit <= s.savedSeen) { s.dirty = false; s.confirmedText = ED.text; } // tout est arrivé au serveur
+    }
     if (keys.has("externalAt") && s.loaded) {
       const by = s.meta.get("externalBy");
       toast(by && by !== "Modification externe" ? `Document mis à jour depuis le dépôt par ${by}.` : "Document mis à jour depuis le dépôt (modification externe).");
@@ -707,6 +710,7 @@ function onLoaded(s) {
   const ro = !canWrite(s.path);
   ED.open({ kind: docKind(s), text: s.ytext.toString(), ytext: s.ytext, awareness: s.provider.awareness, undoManager: s.undo, readOnly: ro, placeholder: placeholderFor(s, ro) });
   s.loaded = true;
+  s.confirmedText = ED.text; // dernier texte que le serveur a certainement reçu
   if (s.pendingText != null && !ro) reintegrate(s, ED.text); // passe par l'éditeur : partagé avec les autres
   s.pendingText = null;
   s.savedSeen = Date.now();
@@ -720,8 +724,17 @@ function onLoaded(s) {
 function merge3(base, mine, theirs) {
   if (mine === base || mine === theirs) return theirs;
   if (theirs === base) return mine;
-  const out = applyPatch(theirs, structuredPatch("base", "mine", base, mine, "", "", { context: 1 }));
-  return out === false ? null : out;
+  // fins de ligne Windows (CRLF) : fusion en LF, puis le texte garde ses fins de ligne (comme src/authorship.js)
+  const crlf = /\r\n/.test(theirs);
+  const lf = (t) => t.replace(/\r\n/g, "\n");
+  let out = applyPatch(lf(theirs), structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 1 }));
+  if (out === false) {
+    // lignes voisines : nouvel essai sans contexte si chaque modification remplace une ligne repérable
+    const p0 = structuredPatch("base", "mine", lf(base), lf(mine), "", "", { context: 0 });
+    if (p0.hunks.every((h) => h.lines.some((l) => l[0] === "-"))) out = applyPatch(lf(theirs), p0);
+  }
+  if (out === false) return null;
+  return crlf ? out.replace(/\n/g, "\r\n") : out;
 }
 /**
  * Réintègre ce qui a été tapé pendant une coupure (s.pendingText, parti de s.pendingBase) dans
@@ -757,7 +770,10 @@ function showConflict(mine) {
 function startReconnect(s) {
   if (s.reconnecting) return;
   s.reconnecting = true;
-  s.reconnectBase = ED.text; // texte au moment de la coupure : ce qui est tapé ensuite sera réintégré
+  // Point de départ de la réintégration : le dernier texte que le serveur a certainement reçu.
+  // Une coupure réseau n'est remarquée qu'au bout de ~30 s : ce qui a été tapé entre-temps n'est
+  // jamais arrivé, il doit être réintégré lui aussi.
+  s.reconnectBase = s.dirty && s.confirmedText != null ? s.confirmedText : ED.text;
   try { s.provider.disconnect(); } catch (_e) {}
   renderStatus();
   s.retryTimer = setInterval(async () => {
@@ -813,8 +829,16 @@ async function saveNow(manual) {
     s.savedSeen = Date.now(); s.dirty = false;
     if (s.offline && typeof d.content === "string") {
       // le serveur a fusionné avec les modifications des autres : on affiche le résultat
-      s.offlineBase = d.content;
-      if (d.content !== sent && ED.text === sent) { ED.setText(d.content); s.dirty = false; clearTimeout(s.offlineTimer); }
+      if (ED.text === sent) {
+        s.offlineBase = d.content;
+        if (d.content !== sent) { ED.setText(d.content); s.dirty = false; clearTimeout(s.offlineTimer); }
+      } else {
+        // frappe pendant l'enregistrement : elle est rejouée sur la version fusionnée, sinon la
+        // version de départ reste celle envoyée (l'enregistrement suivant refera la fusion)
+        const merged = merge3(sent, ED.text, d.content);
+        if (merged !== null) { s.offlineBase = d.content; if (merged !== ED.text) ED.setText(merged); }
+        s.dirty = true;
+      }
     }
     if (manual) toast(d.committed ? "Enregistré dans le dépôt." : "Déjà à jour.");
   } catch (e) {
@@ -992,12 +1016,11 @@ async function insertFiles(files, pos) {
   const jobs = [];
   for (const f of list) {
     if (f.size > maxMB * 1048576) { toast(`« ${f.name || "image"} » dépasse ${maxMB} Mo : non inséré.`, { error: true }); continue; }
-    const name = insertedName(f);
-    const image = /^image\//.test(f.type);
-    // repère visible le temps de l'envoi (unique : remplacé par le lien, même si le texte a bougé)
-    jobs.push({ f, name, image, token: `⟦envoi de « ${name} »… ${Math.random().toString(36).slice(2, 7)}⟧` });
+    jobs.push({ f, name: insertedName(f), image: /^image\//.test(f.type) });
   }
   if (!jobs.length) return;
+  // Endroit de l'insertion, suivi localement pendant l'envoi (rien n'est écrit dans le texte partagé
+  // avant que le fichier soit dans le dépôt : pas de repère qui traînerait chez les autres).
   let at = pos == null ? ED.selection.head : pos;
   let lead = "";
   if (pos != null) {
@@ -1006,8 +1029,9 @@ async function insertFiles(files, pos) {
     at = ln.to;
     if (ln.text.trim()) lead = "\n";
   }
-  ED.insertAt(at, lead + jobs.map((j) => j.token).join("\n"));
-  let done = 0;
+  const spot = ED.track(at);
+  toast(jobs.length > 1 ? `Envoi de ${jobs.length} fichiers…` : `Envoi de « ${jobs[0].name} »…`);
+  const links = [];
   for (const j of jobs) {
     const folder = j.image ? [dir, `${stem} - images`].filter(Boolean).join("/") : dir;
     const want = folder ? `${folder}/${j.name}` : j.name;
@@ -1017,16 +1041,24 @@ async function insertFiles(files, pos) {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.ok) throw new Error(d.error || `erreur ${r.status}`);
-      const alt = fileName(d.path).replace(/\.[^.]+$/, "").replace(/[[\]]/g, "");
-      const md = j.image ? `![${alt}](${relLink(s.path, d.path)})` : `[${fileName(d.path).replace(/[[\]]/g, "")}](${relLink(s.path, d.path)})`;
-      if (S === s) ED.replaceText(j.token, md);
-      done++;
+      const label = fileName(d.path).replace(/[[\]]/g, "");
+      links.push({ path: d.path, md: j.image ? `![${label.replace(/\.[^.]+$/, "")}](${relLink(s.path, d.path)})` : `[${label}](${relLink(s.path, d.path)})` });
     } catch (e) {
-      if (S === s) ED.replaceText(j.token, "");
       toast(`Échec de l'envoi de « ${j.name} » : ${e.message}`, { error: true });
     }
   }
-  if (done) { refreshTree(); toast(done > 1 ? `${done} fichiers insérés dans le document.` : jobs[0].image ? "Image insérée." : "Fichier inséré."); }
+  ED.untrack(spot);
+  if (!links.length) return;
+  refreshTree();
+  const text = lead + links.map((l) => l.md).join("\n");
+  if (S && S.loaded && S.path === s.path && !ED.readOnly) {
+    // même document : à l'endroit suivi (ou au curseur si le document a été rouvert entre-temps)
+    ED.insertAt(S === s ? spot.pos : ED.selection.head, text);
+    toast(links.length > 1 ? `${links.length} fichiers insérés dans le document.` : jobs[0].image ? "Image insérée." : "Fichier inséré.");
+  } else {
+    // l'utilisateur est passé à un autre document : le fichier est enregistré, rien n'est inséré ailleurs
+    toast(`Enregistré dans « ${dirName(links[0].path) || "la racine"} » ; non inséré, car tu as changé de document.`, { ms: 8000 });
+  }
 }
 
 let dragDepth = 0;
@@ -1474,6 +1506,7 @@ function showShortcuts() {
     title: "Raccourcis clavier",
     body: `<table class="khelp">
       <tr><td>${svg("search")} ${kbd("Ctrl K")}</td><td>Rechercher un document / dans le contenu</td></tr>
+      <tr><td>${svg("search")} ${kbd("Ctrl F")}</td><td>Rechercher et remplacer dans le document ouvert (${kbd("F3")} : suivant)</td></tr>
       <tr><td>${svg("link")} ${kbd("Ctrl L")}</td><td>Copier le lien du document ouvert</td></tr>
       <tr><td>${svg("check")} ${kbd("Ctrl S")}</td><td>Enregistrer maintenant</td></tr>
       <tr><td>${svg("comment")} ${kbd("Ctrl Alt M")}</td><td>Commenter le passage sélectionné</td></tr>
@@ -2610,7 +2643,12 @@ function openMoreMenu() {
   moreMenu.style.top = r.bottom + 6 + "px";
   moreMenu.style.right = Math.max(8, innerWidth - r.right) + "px";
   $("#btnMore").setAttribute("aria-expanded", "true");
-  for (const it of $$("button", moreMenu)) it.onclick = () => { const b = $("#" + it.dataset.for); closeMoreMenu(); if (b && !b.disabled) b.click(); };
+  for (const it of $$("button", moreMenu)) it.onclick = () => {
+    const b = $("#" + it.dataset.for);
+    closeMoreMenu();
+    $("#btnMore").focus(); // la fenêtre éventuellement ouverte rendra le focus à « ⋯ »
+    if (b && !b.disabled) b.click();
+  };
   document.addEventListener("pointerdown", onMoreOutside, true);
   const first = $("button:not([disabled])", moreMenu);
   if (first) first.focus();
@@ -2645,6 +2683,9 @@ window.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); $("#search").focus(); $("#search").select(); }
   if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); copyLink(); }
   if (mod && e.altKey && e.key.toLowerCase() === "m") { e.preventDefault(); startDraft(); }
+  // Ctrl+F hors de l'éditeur : recherche dans le document ouvert (celle du navigateur ne voit que l'écran)
+  if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f" && !e.defaultPrevented && S && S.loaded && !moreMenu
+    && !(e.target.closest && e.target.closest("input, textarea, select, .modal"))) { e.preventDefault(); ED.openSearch(); }
   const typing = e.target.closest && e.target.closest("input, textarea, select, [contenteditable]");
   if (e.key === "?" && !typing) { e.preventDefault(); showShortcuts(); }
 });
