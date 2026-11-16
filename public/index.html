@@ -64,13 +64,8 @@
         <div class="status" id="status"></div>
         <div class="spacer"></div>
         <div class="presence" id="presence"></div>
-        <div class="segmented" id="viewSwitch" role="tablist" aria-label="Affichage">
-          <button data-view="edit" title="Éditer"><span data-icon="pencil"></span><span class="lbl">Éditer</span></button>
-          <button data-view="split" title="Côte à côte"><span data-icon="columns"></span><span class="lbl">Côte à côte</span></button>
-          <button data-view="preview" title="Aperçu"><span data-icon="eye"></span><span class="lbl">Aperçu</span></button>
-        </div>
         <button class="icon-btn tb-more-item" id="btnCopyLink" title="Copier le lien vers ce document (Ctrl+L)" hidden><span data-icon="link"></span></button>
-        <button class="icon-btn tb-more-item" id="btnToc" title="Table des matières (aperçu)" hidden><span data-icon="list"></span></button>
+        <button class="icon-btn tb-more-item" id="btnToc" title="Sommaire du document" hidden><span data-icon="list"></span></button>
         <button class="icon-btn" id="btnComments" title="Tous les commentaires" hidden><span data-icon="comment"></span><span class="c-badge" id="ccBadge" hidden></span></button>
         <button class="icon-btn tb-more-item" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
         <button class="icon-btn tb-more-item" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
@@ -81,7 +76,7 @@
         <button class="btn btn-primary" id="btnSave" title="Enregistrer maintenant (Ctrl+S)"><span data-icon="check"></span><span class="lbl">Enregistrer</span></button>
       </header>
 
-      <section class="area" id="area" data-view="edit" data-state="empty">
+      <section class="area" id="area" data-state="empty">
         <div class="empty" id="empty">
           <div class="empty-icon" data-icon="file"></div>
           <h2>Aucun document ouvert</h2>
@@ -111,9 +106,6 @@
           </div>
           <div class="authors-bar" id="authorsBar" hidden></div>
           <div class="editor-host" id="editor"></div>
-        </div>
-        <div class="pane pane-preview" id="panePreview">
-          <article class="prose" id="preview"></article>
         </div>
         <div class="pane pane-file" id="paneFile"></div>
         <aside class="comments-panel" id="commentsPanel" hidden>

@@ -16,7 +16,7 @@ en train d'être tapé.
 - **Qui a écrit quoi** (bouton surligneur) : chaque passage est coloré selon son auteur, avec la
   part de chacun et, au survol, le nom et la date. Les modifications de **Claude** (commits avec
   `Co-Authored-By: Claude`, ajouté par défaut par Claude Code) apparaissent sous son nom.
-- **Commentaires façon Google Docs** : sélectionne un passage (dans l'éditeur ou l'aperçu) puis le
+- **Commentaires façon Google Docs** : sélectionne un passage puis le
   bouton **+** qui apparaît à droite (ou `Ctrl+Alt+M`). Les discussions s'affichent dans la marge,
   en face de leur passage ; on peut répondre, modifier ses messages, résoudre ou rouvrir une
   discussion. Le passage commenté suit les modifications de tout le monde (y compris celles de
@@ -34,7 +34,7 @@ en train d'être tapé.
   Markdown (`**`, `#`, `[…](…)`) ne réapparaissent que sur la ligne où se trouve le curseur. Barre de
   mise en forme (gras, titres, listes, lien…) et raccourcis : `Ctrl+B`, `Ctrl+I`, `Ctrl+Alt+1/2/3`,
   `Ctrl+Maj+7/8/9`, `Ctrl+E`. `Entrée` continue une liste. Les fichiers restent du Markdown standard.
-- Vues édition / côte à côte / aperçu, liens entre documents (`Ctrl+clic`), thème clair ou sombre.
+- Sommaire flottant (titres du document), liens entre documents (`Ctrl+clic`), thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
 - **Autres fichiers** : import par bouton ou glisser-déposer (25 Mo max par fichier). Les PDF et les
   images s'affichent dans la page, les fichiers Word (.docx) en aperçu, les autres (Excel, PowerPoint…)
@@ -223,5 +223,5 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - `client/editor.js` — l'éditeur (CodeMirror 6 relié au texte partagé par y-codemirror.next) :
   rendu mis en forme, barre et raccourcis de mise en forme, surlignages des auteurs et commentaires
 - `client/libs.js` → `public/vendor/libs.js` : bibliothèques navigateur (Yjs, y-websocket, CodeMirror,
-  marked, DOMPurify) et l'éditeur, regroupés en un fichier servi localement. **Après toute
+  DOMPurify) et l'éditeur, regroupés en un fichier servi localement. **Après toute
   modification de `client/` : `npm run build`** (le fichier construit est versionné).

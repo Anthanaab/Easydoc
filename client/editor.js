@@ -414,6 +414,8 @@ export function createEditor(parent, hooks) {
       return view.documentTop + view.lineBlockAt(p).top;
     },
     lineAt(pos) { return view.state.doc.lineAt(pos); },
+    /** Position du début de la ligne n (numérotée à partir de 1). */
+    lineStart(n) { const d = view.state.doc; return d.line(Math.max(1, Math.min(n || 1, d.lines))).from; },
     format(name) { const f = FORMATS[name]; return f ? f(view) : false; },
     get mode() { return mode; },
   };

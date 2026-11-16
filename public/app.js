@@ -1,5 +1,5 @@
 // Easydoc — interface (éditeur collaboratif temps réel adossé à un dépôt git/GitHub).
-import { Y, WebsocketProvider, Marked, DOMPurify, createEditor } from "./vendor/libs.js";
+import { Y, WebsocketProvider, DOMPurify, createEditor } from "./vendor/libs.js";
 
 /* ============================================================================================
  * Utilitaires
@@ -434,14 +434,11 @@ function renderTree() {
  * ========================================================================================== */
 const edHost = $("#editor");          // conteneur de l'éditeur (CodeMirror)
 const paneEditor = $("#paneEditor");
-const panePreview = $("#panePreview");
 const area = $("#area");
-const marked = new Marked({ gfm: true, breaks: true });
 let S = null; // document en cours d'édition
 let F = null; // fichier affiché (PDF, Word, image…)
 
 function setArea(state, kind = "") { area.dataset.state = state; area.dataset.kind = kind; }
-function currentView() { return area.dataset.view; }
 
 /* ---- L'éditeur : Markdown mis en forme, branché sur le texte partagé ---- */
 const ED = createEditor(edHost, {
@@ -472,7 +469,7 @@ function onEditorUpdate(u, local) {
       if (s.offline) { clearTimeout(s.offlineTimer); s.offlineTimer = setTimeout(() => saveNow(false), 3000); }
       renderStatus();
     }
-    schedulePreview();
+    scheduleToc();
   }
   if (u.docChanged || u.selectionSet) publishLine();
   if (u.selectionSet || u.focusChanged) {
@@ -491,32 +488,16 @@ for (const b of $$("#fmtBar [data-fmt]")) {
   b.addEventListener("click", () => ED.format(b.dataset.fmt));
 }
 function updateFmtBar() {
-  const show = !!(S && S.loaded && S.kind === "markdown" && !ED.readOnly && currentView() !== "preview");
+  const show = !!(S && S.loaded && S.kind === "markdown" && !ED.readOnly);
   $("#fmtBar").hidden = !show;
 }
 
-/* ---- Défilement synchronisé des deux panneaux en vue côte-à-côte ---- */
-let _scrollSync = false; // garde anti-boucle
-function syncPane(from, to) {
-  if (_scrollSync || !S || currentView() !== "split") return;
-  const max1 = from.scrollHeight - from.clientHeight;
-  const max2 = to.scrollHeight - to.clientHeight;
-  if (max1 <= 0 || max2 <= 0) return;
-  const ratio = Math.min(1, Math.max(0, from.scrollTop / max1));
-  _scrollSync = true;
-  to.scrollTop = ratio * max2;
-  requestAnimationFrame(() => { _scrollSync = false; });
-}
-function bindPanScroll() {
-  paneEditor.addEventListener("scroll", () => requestAnimationFrame(() => syncPane(paneEditor, panePreview)), { passive: true });
-  panePreview.addEventListener("scroll", () => requestAnimationFrame(() => syncPane(panePreview, paneEditor)), { passive: true });
-}
-bindPanScroll();
 
 function closeSession() {
   F = null;
   renderAuthorsBar(null);
   hideTip();
+  closeToc();
   $("#paneFile").innerHTML = "";
   resetComments();
   if (!S) return;
@@ -555,7 +536,7 @@ function enterPath(path) {
 
 function openFile(path, opts = {}) {
   if (!isEditable(path)) return openViewer(path);
-  if (S && S.path === path && !opts.force) return;
+  if (S && S.path === path && !opts.force) { if (opts.line) goToLine(opts.line); return; }
   closeSession();
   const ydoc = new Y.Doc();
   const provider = new WebsocketProvider(wsBase, encPath(path), ydoc, { disableBc: true });
@@ -563,7 +544,7 @@ function openFile(path, opts = {}) {
     path, ydoc, provider, kind: kindOf(path),
     ytext: ydoc.getText("content"), meta: ydoc.getMap("meta"),
     loaded: false, connected: false, offline: false, reconnecting: false,
-    lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null,
+    lastLocalEdit: 0, savedSeen: 0, dirty: false, pendingText: opts.pendingText ?? null, gotoLine: opts.line || 0,
   };
   // annuler / rétablir : seulement mes propres frappes (l'éditeur ajoute son origine)
   s.undo = new Y.UndoManager(s.ytext, { trackedOrigins: new Set(), captureTimeout: 600 });
@@ -632,7 +613,8 @@ function onLoaded(s) {
   }
   s.pendingText = null;
   s.savedSeen = Date.now();
-  renderPreview(); renderTOC(); renderStatus(); updateButtons(); renderOverlay();
+  renderTOC(); renderStatus(); updateButtons(); renderOverlay();
+  if (s.gotoLine) goToLine(s.gotoLine); // ouvert depuis un résultat de recherche
   // charge les commentaires dès l'ouverture pour afficher les bulles en édition comme en côte-à-côte
   loadComments();
 }
@@ -671,7 +653,8 @@ async function startOffline(s) {
     const ro = !canWrite(s.path);
     ED.open({ kind: docKind(s), text: d.content, readOnly: ro, placeholder: placeholderFor(s, ro) });
     s.loaded = true;
-    renderPreview(); renderStatus(); updateButtons();
+    renderTOC(); renderStatus(); updateButtons();
+    if (s.gotoLine) goToLine(s.gotoLine);
     toast("Temps réel indisponible : le document est ouvert sans collaboration en direct (vérifie le relais WebSocket du proxy).", { error: true, ms: 9000 });
   } catch (e) {
     toast("Impossible d'ouvrir le document : " + e.message, { error: true });
@@ -912,7 +895,7 @@ let ovRaf = 0;
 let authorRuns = null; // [début, fin, auteur, minute] quand « qui a écrit quoi » est affiché
 function renderOverlay() { cancelAnimationFrame(ovRaf); ovRaf = requestAnimationFrame(drawOverlay); }
 function drawOverlay() {
-  const live = S && S.loaded && !S.offline && !S.reconnecting && currentView() !== "preview";
+  const live = S && S.loaded && !S.offline && !S.reconnecting;
   authorRuns = null;
   if (live && showAuthors && ED.text === S.ytext.toString()) {
     const runs = [];
@@ -983,7 +966,6 @@ function toggleAuthors(on = !showAuthors) {
   const b = $("#btnAuthors");
   b.classList.toggle("on", on);
   b.setAttribute("aria-pressed", String(on));
-  if (on && currentView() === "preview") setView("edit");
   hideTip();
   renderOverlay();
 }
@@ -1113,7 +1095,7 @@ function renderSearchResults() {
           <span class="x">${snip}</span></button>`;
       }).join("");
       for (const el of $$(".sr", srBox)) {
-        el.onclick = () => { openFile(el.dataset.path); goToLine(Number(el.dataset.line)); srBox.hidden = true; $("#search").value = ""; renderTree(); };
+        el.onclick = () => { openFile(el.dataset.path, { line: Number(el.dataset.line) }); srBox.hidden = true; $("#search").value = ""; renderTree(); };
       }
     } catch (e) { if (seq === srSeq) srBox.innerHTML = `<div class="sr-hint">${esc(e.message)}</div>`; }
   }, 250);
@@ -1141,61 +1123,66 @@ async function copyLink() {
 }
 $("#btnCopyLink").onclick = copyLink;
 
-/* ---- Table des matières flottante (aperçu Markdown) ---- */
+/* ---- Sommaire flottant : les titres du document, pour s'y rendre d'un clic ---- */
 let tocBar = null;
-function renderTOC() {
-  try {
-  if (tocBar) tocBar.remove();
-  tocBar = null;
-  const visible = !!(S && S.kind === "markdown" && !S.offline && currentView() !== "edit");
-  $("#btnToc").hidden = !visible;
-  if (!visible) return;
-  if (tocBar) closeToc(); // ne pas dupliquer si une barre existe déjà
-  const stash = document.createElement("div"); stash.innerHTML = marked.parse(ED.text || "");
-  const heads = [...stash.querySelectorAll("h1,h2,h3,h4")].map((h) => ({ level: +h.tagName[1], text: h.textContent, id: h.id }));
-  if (!heads.length) return;
-  const headLines = tocHeadingLines(ED.text || ""); // numéros de ligne 1-based de chaque titre (même ordre que `heads`)
-  const wrap = document.createElement("div"); wrap.className = "toc"; wrap.id = "toc";
-  wrap.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" data-act="tocclose" title="Fermer">${svg("x")}</button></h4>${heads.map((h, i) => `<button data-i="${i}" data-line="${headLines[i]}" class="h${h.level}-">${esc(h.text)}</button>`).join("")}</div>`;
-  document.body.appendChild(wrap); tocBar = wrap;
-  for (const b of $$("button", wrap)) b.onclick = () => { goToLine(Number(b.dataset.line || 1) || 1); b.scrollIntoView({ block: "nearest" }); };
-  $(".toc-close", wrap).onclick = (e) => { e.stopPropagation(); closeToc(); };
-  // mise en évidence du titre courant
-  const obs = new IntersectionObserver((entries) => {
-    let cur = null;
-    for (const en of entries) if (en.isIntersecting) cur = en.target;
-    for (const b of $$("button", wrap)) b.classList.toggle("on", b.dataset.i === (cur ? cur.dataset.i : "0"));
-  }, { root: paneEditor, rootMargin: "0px 0px -80% 0px" });
-  for (const b of $$("button", wrap)) { b.dataset.i = b.dataset.i; obs.observe(b); }
-  wrap._obs = obs;
-  } catch (e) { console.error("toc ERREUR:", e); }
-}
-function closeToc() { if (tocBar) { tocBar._obs && tocBar._obs.disconnect(); tocBar.remove(); tocBar = null; } }
-$("#btnToc").onclick = () => { renderTOC(); if (tocBar) tocBar.classList.add("forced"); }; // affiché même par-dessus la marge des commentaires
-
-// Renvoie la liste des numéros de ligne (1-based) des titres ATX (#…, H1-H4) du markdown source,
-// dans l'ordre correspondant aux <h*> générés par marked.parse (titres de type setext ignorés :
-// trop ambigus — --- est aussi un séparateur horizontal).
-function tocHeadingLines(md) {
-  const src = md.split("\n"); const out = [];
-  const globals = new Set(); // colonnes de ``` et ~~~ actives
-  for (let i = 0; i < src.length; i++) {
-    const s = src[i];
-    // bascule de bloc de code
-    const fence = s.trim().match(/^(`{3,}|~{3,})/);
-    if (fence) {
-      const m = fence[1][0];
-      if (globals.has(m + fence[1].length)) globals.delete(m + fence[1].length);
-      else globals.add(m + fence[1].length);
+let tocT = null;
+/** Titres Markdown (# à ####) hors blocs de code : [{ level, text, line }]. */
+function tocHeadings(md) {
+  const out = [];
+  let fence = null;
+  const lines = md.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const s = lines[i];
+    const f = s.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (f) {
+      if (!fence) fence = f[1];
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
       continue;
     }
-    if (globals.size) { continue; }
-    // atx : # ou ## ou ### ou ####
-    const m = s.match(/^\s{0,3}(#{1,4})\s+(.+)$/);
-    if (m) { out.push(i + 1); continue; }
+    if (fence) continue;
+    const m = s.match(/^\s{0,3}(#{1,4})\s+(.+?)\s*#*\s*$/);
+    if (m) out.push({ level: m[1].length, line: i + 1, text: m[2].replace(/\*\*|__|~~|`/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") });
   }
   return out;
 }
+function renderTOC() {
+  if (!tocBar) return;
+  const heads = S && S.loaded && S.kind === "markdown" ? tocHeadings(ED.text) : [];
+  $(".toc-list", tocBar).innerHTML = heads.length
+    ? heads.map((h) => `<button data-line="${h.line}" class="h${h.level}-">${esc(h.text)}</button>`).join("")
+    : '<p class="toc-empty">Aucun titre dans ce document. Ajoute-en avec T1, T2, T3.</p>';
+  for (const b of $$(".toc-list button", tocBar)) b.onclick = () => goToLine(Number(b.dataset.line));
+  updateTocCurrent();
+}
+/** Met en évidence le titre de la partie affichée. */
+function updateTocCurrent() {
+  if (!tocBar || !S || !S.loaded) return;
+  const limit = paneEditor.getBoundingClientRect().top + 90;
+  let cur = null;
+  for (const b of $$(".toc-list button", tocBar)) {
+    if (ED.topAt(ED.lineStart(Number(b.dataset.line))) <= limit) cur = b; else break;
+  }
+  for (const b of $$(".toc-list button", tocBar)) b.classList.toggle("on", b === (cur || $(".toc-list button", tocBar)));
+}
+function scheduleToc() { if (tocBar) { clearTimeout(tocT); tocT = setTimeout(renderTOC, 400); } }
+function openToc() {
+  if (tocBar || !S || S.kind !== "markdown") return;
+  tocBar = document.createElement("div");
+  tocBar.className = "toc";
+  tocBar.innerHTML = `<div class="toc-inner"><h4>Sommaire<button class="toc-close" title="Fermer">${svg("x")}</button></h4><div class="toc-list"></div></div>`;
+  document.body.appendChild(tocBar);
+  $(".toc-close", tocBar).onclick = closeToc;
+  $("#btnToc").classList.add("on");
+  renderTOC();
+}
+function closeToc() {
+  clearTimeout(tocT);
+  if (tocBar) { tocBar.remove(); tocBar = null; }
+  $("#btnToc").classList.remove("on");
+}
+$("#btnToc").onclick = () => (tocBar ? closeToc() : openToc());
+let tocRaf = 0;
+paneEditor.addEventListener("scroll", () => { if (tocBar) { cancelAnimationFrame(tocRaf); tocRaf = requestAnimationFrame(updateTocCurrent); } }, { passive: true });
 
 /* ---- Aide raccourcis ---- */
 function showShortcuts() {
@@ -1207,9 +1194,10 @@ function showShortcuts() {
       <tr><td>${svg("check")} ${kbd("Ctrl S")}</td><td>Enregistrer maintenant</td></tr>
       <tr><td>${svg("comment")} ${kbd("Ctrl Alt M")}</td><td>Commenter le passage sélectionné</td></tr>
       <tr><td>${svg("pencil")} ${kbd("Ctrl Z")} / ${kbd("Ctrl Shift Z")}</td><td>Annuler / rétablir</td></tr>
-      <tr><td>${svg("highlight")} ${kbd("H")}</td><td>Qui a écrit quoi (couleurs)</td></tr>
-      <tr><td>${svg("history")} ${kbd("T")}</td><td>Historique / restaurer une version</td></tr>
-      <tr><td>${svg("plus")} ${kbd("Ctrl N")}</td><td>Nouveau document</td></tr>
+      <tr><td>${kbd("Ctrl B")} / ${kbd("Ctrl I")} / ${kbd("Ctrl E")}</td><td>Gras / italique / code</td></tr>
+      <tr><td>${kbd("Ctrl Alt 1")} à ${kbd("3")}</td><td>Titre 1, 2, 3</td></tr>
+      <tr><td>${kbd("Ctrl Maj 7")} / ${kbd("8")} / ${kbd("9")}</td><td>Liste numérotée / à puces / à cocher</td></tr>
+      <tr><td>${kbd("Ctrl")} + clic</td><td>Ouvrir un lien</td></tr>
       <tr><td>${kbd("Tab")} / ${kbd("Shift Tab")}</td><td>Indenter / dé-indenter</td></tr>
       <tr><td>${kbd("?")}</td><td>Cette aide</td></tr>
     </table>`,
@@ -1222,12 +1210,7 @@ function kbd(t) { return `<span class="kbd">${esc(t)}</span>`; }
 /* ---- Aller à une ligne dans le document ouvert ---- */
 function goToLine(n) {
   if (!S || !S.loaded) return;
-  // ne force pas la vue : on garde la vue courante (édition OU côte-à-côte).
-  // Seul le mode aperçu (sans éditeur visible) bascule en édition pour montrer le curseur.
-  if (currentView() === "preview") setView("edit");
-  const lines = ED.text.split("\n");
-  const target = Math.max(0, Math.min(n - 1, lines.length - 1));
-  let pos = 0; for (let i = 0; i < target; i++) pos += lines[i].length + 1;
+  const pos = ED.lineStart(n);
   ED.setSelection(pos, pos); ED.focus();
 }
 
@@ -1252,46 +1235,6 @@ async function confirmRestore(p, sha) {
     },
   });
 }
-
-/* ============================================================================================
- * Aperçu Markdown
- * ========================================================================================== */
-let previewT = null;
-function schedulePreview() { clearTimeout(previewT); previewT = setTimeout(renderPreview, 150); }
-function renderPreview() {
-  if (!S || S.kind !== "markdown" || currentView() === "edit") return;
-  const el = $("#preview");
-  el.innerHTML = DOMPurify.sanitize(marked.parse(ED.text || ""));
-  for (const a of $$("a[href]", el)) {
-    if (/^[a-z][a-z0-9+.-]*:/i.test(a.getAttribute("href"))) { a.target = "_blank"; a.rel = "noopener noreferrer"; }
-  }
-  // images du dépôt (chemins relatifs) servies par Easydoc
-  for (const img of $$("img[src]", el)) {
-    const target = resolveRel(img.getAttribute("src"), S.path);
-    if (target) img.src = rawUrl(target);
-  }
-  markPreview();
-  if (currentView() !== "edit") layoutRail();
-}
-$("#preview").addEventListener("click", (e) => {
-  const a = e.target.closest("a[href]");
-  if (!a || !S) return;
-  const target = resolveRel(a.getAttribute("href"), S.path);
-  if (target && files.includes(target)) { e.preventDefault(); openFile(target); }
-});
-
-function setView(v) {
-  area.dataset.view = v;
-  renderTOC();
-  updateButtons();
-  localStorage.setItem("ed-view", v);
-  for (const b of $$("#viewSwitch button")) b.classList.toggle("on", b.dataset.view === v);
-  renderPreview();
-  if (S && S.loaded) renderRail();
-  updateFmtBar();
-  renderOverlay();
-}
-for (const b of $$("#viewSwitch button")) b.onclick = () => setView(b.dataset.view);
 
 /* ============================================================================================
  * Statut, présence, boutons
@@ -1341,9 +1284,10 @@ function updateButtons() {
   $("#btnHistory").hidden = !p;
   $("#btnCopyLink").hidden = !p;
   $("#btnComments").hidden = !(p && S && S.kind === "markdown");
+  $("#btnToc").hidden = !(S && S.kind === "markdown");
+  if ($("#btnToc").hidden) closeToc();
   updateFmtBar();
   if ($("#btnComments").hidden) closeComments();
-  $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
 /* ============================================================================================
@@ -1361,7 +1305,6 @@ let cEditing = null;            // modification en cours : { id, replyId, text }
 const replyDrafts = new Map();  // fil → réponse en cours de saisie
 let panelTab = "open";          // panneau : « open » ou « resolved »
 let commentsSeq = 0;
-let previewSel = null;          // sélection dans l'aperçu : { text, top, ratio }
 const RAIL_MIN_PANE = 760;      // largeur minimale du panneau de texte pour afficher la marge
 const C_CTX = 40;
 
@@ -1449,9 +1392,7 @@ function afterOverlay() { layoutRail(); placeAddButton(); }
 function panelOpen() { return !$("#commentsPanel").hidden; }
 function railHost() {
   if (!S || !S.loaded || S.kind !== "markdown" || S.offline || panelOpen()) return null;
-  const v = currentView();
-  const host = v === "edit" ? paneEditor : v === "preview" ? panePreview : null;
-  return host && host.clientWidth >= RAIL_MIN_PANE ? host : null;
+  return paneEditor.clientWidth >= RAIL_MIN_PANE ? paneEditor : null;
 }
 function captureFocus(box) {
   const el = document.activeElement;
@@ -1529,34 +1470,23 @@ function renderRail() {
   }
   renderCommentsPanel();
   updateCommentsBadge();
-  if (currentView() !== "edit") markPreview();
   renderOverlay(); // → afterOverlay → layoutRail
 }
 
-/** Hauteur de chaque passage commenté dans le panneau qui porte la marge. */
-function measureTops(host) {
+/** Hauteur de chaque passage commenté, dans le contenu défilant de l'éditeur. */
+function measureTops() {
   const out = new Map();
-  if (host === paneEditor) {
-    const base = paneEditor.scrollTop - paneEditor.getBoundingClientRect().top;
-    for (const c of openThreads()) out.set(c.id, ED.topAt(c._s) + base);
-    if (draft) out.set("draft", ED.topAt(draft.s) + base);
-  } else {
-    const hr = host.getBoundingClientRect();
-    for (const m of $$("mark.cmark", $("#preview"))) {
-      const t = m.getBoundingClientRect().top - hr.top + host.scrollTop;
-      for (const id of m.dataset.cids.split(" ")) if (!out.has(id)) out.set(id, t);
-    }
-    if (draft && !out.has("draft") && draft.top != null) out.set("draft", draft.top);
-  }
+  const base = paneEditor.scrollTop - paneEditor.getBoundingClientRect().top;
+  for (const c of openThreads()) out.set(c.id, ED.topAt(c._s) + base);
+  if (draft) out.set("draft", ED.topAt(draft.s) + base);
   return out;
 }
 /** Place les cartes en face de leur passage, sans chevauchement ; la carte active est alignée exactement. */
 function layoutRail() {
   const host = rail.parentNode;
   if (!host || !area.classList.contains("has-rail")) return;
-  const content = host === paneEditor ? edHost : $("#preview");
-  rail.style.left = content.offsetLeft + content.offsetWidth + 12 + "px";
-  const tops = measureTops(host);
+  rail.style.left = edHost.offsetLeft + edHost.offsetWidth + 12 + "px";
+  const tops = measureTops();
   const cards = $$(".c-card", rail).map((el) => ({ el, id: el.dataset.cid, want: tops.get(el.dataset.cid) }));
   for (const x of cards) x.el.style.display = x.want == null ? "none" : "";
   const placed = cards.filter((x) => x.want != null).sort((a, b) => a.want - b.want);
@@ -1573,163 +1503,37 @@ function layoutRail() {
 
 /* ---- Bouton « + » à côté de la sélection ---- */
 function placeAddButton() {
-  if (currentView() !== "preview") {
-    const sel = ED.selection;
-    const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && !ED.readOnly && ED.hasFocus
-      && !sel.empty && docText().slice(sel.from, sel.to).trim();
-    if (!ok) { if (addBtn.parentNode === paneEditor) addBtn.hidden = true; return; }
-    if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
-    addBtn.style.top = ED.topAt(sel.from) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop - 6 + "px";
-    addBtn.style.left = edHost.offsetLeft + edHost.offsetWidth - 42 + "px";
-    addBtn.hidden = false;
-  }
-}
-function onPreviewSelection() {
-  const pv = $("#preview");
-  const sel = getSelection();
-  const ok = S && S.loaded && S.kind === "markdown" && !ED.readOnly && !draft && currentView() !== "edit"
-    && sel.rangeCount && !sel.isCollapsed && pv.contains(sel.anchorNode) && pv.contains(sel.focusNode) && sel.toString().trim();
-  if (!ok) { previewSel = null; if (addBtn.parentNode === panePreview) addBtn.hidden = true; return; }
-  const range = sel.getRangeAt(0);
-  const pre = document.createRange();
-  pre.selectNodeContents(pv); pre.setEnd(range.startContainer, range.startOffset);
-  const hr = panePreview.getBoundingClientRect();
-  const r = range.getClientRects()[0] || range.getBoundingClientRect();
-  previewSel = { text: sel.toString(), top: r.top - hr.top + panePreview.scrollTop, ratio: pre.toString().length / Math.max(1, pv.textContent.length) };
-  if (addBtn.parentNode !== panePreview) panePreview.appendChild(addBtn);
-  addBtn.style.top = previewSel.top - 4 + "px";
-  addBtn.style.left = pv.offsetLeft + pv.offsetWidth - 42 + "px";
+  const sel = ED.selection;
+  const ok = S && S.loaded && S.kind === "markdown" && !S.offline && !draft && !ED.readOnly && ED.hasFocus
+    && !sel.empty && docText().slice(sel.from, sel.to).trim();
+  if (!ok) { addBtn.hidden = true; return; }
+  if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
+  addBtn.style.top = ED.topAt(sel.from) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop - 6 + "px";
+  addBtn.style.left = edHost.offsetLeft + edHost.offsetWidth - 42 + "px";
   addBtn.hidden = false;
 }
-let pselRaf = 0;
-document.addEventListener("selectionchange", () => {
-  cancelAnimationFrame(pselRaf); pselRaf = requestAnimationFrame(onPreviewSelection);
-});
 addBtn.addEventListener("mousedown", (e) => e.preventDefault()); // garde la sélection
 addBtn.addEventListener("click", () => startDraft());
-
-/** Passage du texte source correspondant à une sélection faite dans l'aperçu (mise en forme ignorée). */
-function sourceFromPreview(sel) {
-  const src = docText();
-  const words = sel.text.trim().split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 400) return null;
-  const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const gap = "(?:\\]\\([^)]*\\)|<[^>]+>|\\d+[.)]|[\\s*_`~>#\\[\\]!|\\\\+-])+";
-  let re;
-  try { re = new RegExp(words.map(reEsc).join(gap), "g"); } catch (_e) { return null; }
-  let best = null, bestD = Infinity, m, n = 0;
-  while ((m = re.exec(src)) && n++ < 300) {
-    const d = Math.abs(m.index / Math.max(1, src.length) - sel.ratio);
-    if (d < bestD) { bestD = d; best = [m.index, m.index + m[0].length]; }
-  }
-  return best;
-}
-
-/* ---- Passages commentés dans l'aperçu ---- */
-function mdPlain(md) {
-  return md
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+(\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gm, "")
-    .replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1")
-    .replace(/\*\*|__|~~|`+/g, "")
-    .replace(/(^|[^\p{L}\p{N}])[*_](?=\S)|(?<=\S)[*_](?=[^\p{L}\p{N}]|$)/gu, "$1")
-    .replace(/<[^>]+>/g, "").replace(/\s*\|\s*/g, " ").replace(/\s+/g, " ").trim();
-}
-function previewIndex(el) {
-  let norm = "", space = true;
-  const map = [];
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    const t = n.data;
-    for (let i = 0; i < t.length; i++) {
-      const sp = /\s/.test(t[i]);
-      if (sp && space) continue;
-      norm += sp ? " " : t[i]; map.push([n, i]); space = sp;
-    }
-  }
-  return { norm, map };
-}
-function wrapInPreview(el, it) {
-  const plain = mdPlain(it.quote || "");
-  if (!plain) return;
-  const cands = [plain];
-  if (plain.length > 60) cands.push(plain.slice(0, 60).trim(), plain.slice(-60).trim());
-  const { norm, map } = previewIndex(el);
-  for (const q of cands) {
-    let best = -1, bestD = Infinity;
-    for (let i = norm.indexOf(q), n = 0; i >= 0 && n < 100; i = norm.indexOf(q, i + 1), n++) {
-      const d = Math.abs(i / Math.max(1, norm.length) - it.ratio);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    if (best < 0) continue;
-    const segs = new Map();
-    for (let i = best; i < best + q.length; i++) {
-      const [node, off] = map[i];
-      const s = segs.get(node);
-      if (s) s[1] = off + 1; else segs.set(node, [off, off + 1]);
-    }
-    for (const [node, [a, b]] of segs) {
-      if (!node.data.slice(a, b).trim()) continue;
-      let t = node;
-      if (a > 0) t = t.splitText(a);
-      if (b - a < t.data.length) t.splitText(b - a);
-      const m = document.createElement("mark");
-      m.className = "cmark" + (it.on ? " on" : "");
-      m.dataset.cids = it.id;
-      m.style.setProperty("--ca", it.color);
-      t.replaceWith(m); m.appendChild(t);
-    }
-    return;
-  }
-}
-function markPreview() {
-  const el = $("#preview");
-  if (!el || !S || S.kind !== "markdown" || currentView() === "edit") return;
-  for (const m of $$("mark.cmark", el)) m.replaceWith(...m.childNodes);
-  el.normalize();
-  const len = Math.max(1, docText().length);
-  const items = openThreads().map((c) => ({ id: c.id, color: c.color || "#888", quote: c.quote, ratio: c._s / len, on: c.id === activeCid }));
-  if (draft) items.push({ id: "draft", color: me.color, quote: draft.quote, ratio: draft.s / len, on: true });
-  for (const it of items) wrapInPreview(el, it);
-}
-$("#preview").addEventListener("click", (e) => {
-  const m = e.target.closest("mark.cmark");
-  if (m && !e.target.closest("a")) {
-    const id = m.dataset.cids.split(" ")[0];
-    if (id !== "draft") { activateComment(id); if (!railHost()) openComments(); }
-  } else if (activeCid && getSelection().isCollapsed && !e.target.closest("a")) { activeCid = null; renderRail(); }
-});
 
 /* ---- Actions ---- */
 function startDraft() {
   if (!S || !S.loaded || S.kind !== "markdown" || ED.readOnly || S.offline) return;
-  let s, e, top = null;
-  if (currentView() === "preview" || (previewSel && !ED.hasFocus)) {
-    if (!previewSel) return toast("Sélectionne d'abord le passage à commenter.");
-    const r = sourceFromPreview(previewSel);
-    if (!r) return toast("Passage introuvable dans le document : sélectionne-le dans l'éditeur.", { error: true });
-    [s, e] = r; top = previewSel.top;
-  } else {
-    ({ from: s, to: e } = ED.selection);
-    if (e <= s) { // pas de sélection : toute la ligne du curseur
-      const v = docText();
-      s = v.lastIndexOf("\n", s - 1) + 1;
-      e = v.indexOf("\n", s); if (e < 0) e = v.length;
-    }
-    const v = docText();
-    while (s < e && /\s/.test(v[s])) s++;
-    while (e > s && /\s/.test(v[e - 1])) e--;
+  let { from: s, to: e } = ED.selection;
+  const v = docText();
+  if (e <= s) { // pas de sélection : toute la ligne du curseur
+    s = v.lastIndexOf("\n", s - 1) + 1;
+    e = v.indexOf("\n", s); if (e < 0) e = v.length;
   }
+  while (s < e && /\s/.test(v[s])) s++;
+  while (e > s && /\s/.test(v[e - 1])) e--;
   if (e <= s) return toast("Sélectionne d'abord le passage à commenter.");
-  draft = { s, e, quote: docText().slice(s, e), text: "", top };
+  draft = { s, e, quote: v.slice(s, e), text: "" };
   activeCid = null;
   addBtn.hidden = true;
-  previewSel = null;
-  getSelection().removeAllRanges();
   if (!railHost()) openComments(); else renderRail();
   requestAnimationFrame(() => { const t = $('.c-card.draft textarea'); if (t) t.focus(); });
 }
-function cancelDraft() { draft = null; renderRail(); if (currentView() !== "preview") ED.focus(); }
+function cancelDraft() { draft = null; renderRail(); ED.focus(); }
 async function submitDraft() {
   if (!draft || !draft.text.trim() || draft.busy) return;
   const full = docText();
@@ -1781,10 +1585,6 @@ function activateComment(id, opts = {}) {
 function scrollToComment(id) {
   const c = commentsList.find((x) => x.id === id);
   if (!c || c._s == null) return;
-  if (currentView() === "preview") {
-    requestAnimationFrame(() => { const m = $(`#preview mark.cmark[data-cids~="${id}"]`); if (m) m.scrollIntoView({ block: "center", behavior: "smooth" }); });
-    return;
-  }
   const top = ED.topAt(c._s) - paneEditor.getBoundingClientRect().top + paneEditor.scrollTop;
   paneEditor.scrollTo({ top: top - paneEditor.clientHeight / 3, behavior: "smooth" });
 }
@@ -1879,7 +1679,7 @@ async function loadComments() {
 }
 function resetComments() {
   commentsSeq++;
-  commentsPath = null; commentsList = []; activeCid = null; draft = null; cEditing = null; previewSel = null;
+  commentsPath = null; commentsList = []; activeCid = null; draft = null; cEditing = null;
   replyDrafts.clear();
   rail.remove(); addBtn.hidden = true;
   area.classList.remove("has-rail");
@@ -2556,7 +2356,6 @@ function pathFromHash() {
 (async function start() {
   hydrateIcons();
   applyTheme(document.documentElement.dataset.theme);
-  setView(localStorage.getItem("ed-view") || "edit");
   let state;
   try { state = await api("GET", "/api/auth/state"); }
   catch (e) { toast("Serveur injoignable : " + e.message, { error: true }); return; }
