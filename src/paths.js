@@ -37,6 +37,10 @@ function safeFilePath(input) {
   for (const seg of norm.split("/")) {
     if (!seg || seg === "." || seg === ".." || seg.startsWith(".")) return null;
     if (!SEGMENT.test(seg)) return null;
+    // Windows ignore un point ou un espace final et accepte les noms courts « INTERN~1 » :
+    // ce seraient d'autres noms pour un même fichier, qui échapperaient à ses droits d'accès.
+    if (/[. ]$/.test(seg) || /~\d/.test(seg)) return null;
+    if (seg.startsWith("-")) return null; // jamais lu comme une option par git
   }
   return norm;
 }

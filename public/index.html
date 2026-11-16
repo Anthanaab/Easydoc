@@ -9,8 +9,9 @@
   <script>
     // thème appliqué avant l'affichage (évite un flash)
     (function () {
-      var t = localStorage.getItem("ed-theme");
-      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      var t = null;
+      try { t = localStorage.getItem("ed-theme"); } catch (e) {}
+      if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
       document.documentElement.dataset.theme = t;
     })();
   </script>

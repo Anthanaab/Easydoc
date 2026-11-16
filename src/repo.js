@@ -57,7 +57,47 @@ class RepoService {
     const root = path.resolve(this.options.localRepoDir);
     const full = path.resolve(root, rel);
     if (full !== root && !full.startsWith(root + path.sep)) throw new Error("chemin refusé");
+    // un lien symbolique placé dans le dépôt (par un agent, une copie…) ne doit pas mener
+    // ailleurs sur le serveur (data/config.json contient le jeton GitHub)
+    let real = full;
+    while (!fs.existsSync(real) && real !== root) real = path.dirname(real); // fichier pas encore créé
+    if (fs.existsSync(real)) {
+      const realRoot = fs.realpathSync.native(root);
+      const r = fs.realpathSync.native(real);
+      if (r !== realRoot && !r.startsWith(realRoot + path.sep)) throw new Error("chemin refusé (lien vers l'extérieur du dépôt)");
+    }
     return full;
+  }
+
+  /** Disque du dépôt local insensible à la casse (Windows, macOS) : « A.md » et « a.md » sont un même fichier. */
+  caseInsensitive() {
+    if (this.mode !== "local") return false;
+    if (this._ciCache === undefined) {
+      const root = path.resolve(this.options.localRepoDir);
+      try { this._ciCache = fs.existsSync(root.toUpperCase()) && fs.existsSync(root.toLowerCase()); }
+      catch (_e) { this._ciCache = process.platform === "win32" || process.platform === "darwin"; }
+    }
+    return this._ciCache;
+  }
+
+  /**
+   * Nom réel d'un chemin sur un disque insensible à la casse : « readme.md » → « README.md ».
+   * Un même fichier n'a ainsi qu'un seul nom pour les droits d'accès et l'édition à plusieurs.
+   */
+  canonical(rel) {
+    if (!rel || !this.caseInsensitive()) return rel;
+    let dir = path.resolve(this.options.localRepoDir);
+    const out = [];
+    const segs = rel.split("/");
+    for (let i = 0; i < segs.length; i++) {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (_e) { return [...out, ...segs.slice(i)].join("/"); }
+      const exact = names.includes(segs[i]) ? segs[i] : names.find((n) => n.toLowerCase() === segs[i].toLowerCase());
+      if (!exact) return [...out, ...segs.slice(i)].join("/"); // n'existe pas encore : nom tel quel
+      out.push(exact);
+      dir = path.join(dir, exact);
+    }
+    return out.join("/");
   }
 
   /** SHA du dernier commit de la branche (sert à détecter les modifications externes). */

@@ -22,7 +22,8 @@ const { Octokit } = require("@octokit/rest");
 const yws = require("y-websocket/bin/utils");
 const { RepoService } = require("./src/repo");
 const { SettingsStore } = require("./src/settings");
-const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths");
+const paths = require("./src/paths");
+const { isEditable, kindOf } = paths;
 const convert = require("./src/convert");
 const auth = require("./src/auth");
 const authorship = require("./src/authorship");
@@ -64,6 +65,11 @@ const repo = new RepoService({
 const users = new auth.UserStore(path.join(DATA_DIR, "users.json"));
 const sessions = new auth.SessionStore(path.join(DATA_DIR, "sessions.json"));
 const access = new auth.AccessStore(path.join(DATA_DIR, "access.json"));
+access.caseInsensitive = () => repo.caseInsensitive();
+// Tout chemin reçu (API, WebSocket) est validé puis ramené au nom réel du fichier : sur un disque
+// insensible à la casse, « INTERNE/x.md » et « Interne/x.md » sont un seul fichier, avec les mêmes droits.
+const safeFilePath = (input) => { const p = paths.safeFilePath(input); return p && repo.canonical(p); };
+const safeDocPath = (input) => { const p = paths.safeDocPath(input); return p && repo.canonical(p); };
 const COOKIE = "easydoc_session";
 
 function parseCookies(header) {
@@ -111,7 +117,8 @@ function sameOrigin(req) {
   if (!o) return true; // pas un navigateur, ou requête de la même page sans en-tête Origin
   let host;
   try { host = new URL(o).host; } catch (_e) { return false; }
-  const fwd = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  // X-Forwarded-Host n'est cru que s'il vient d'un proxy de confiance (sinon n'importe qui l'invente)
+  const fwd = trustProxy(req.socket.remoteAddress, 0) ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
   if (host === req.headers.host || (fwd && host === fwd)) return true;
   // requête arrivée par le tunnel sous l'un de ses noms publics
   return trustProxy(req.socket.remoteAddress, 0) && tunnel.hostnames.includes(host.replace(/:443$/, ""));
@@ -259,7 +266,7 @@ function enforceAccess() {
   for (const [name, doc] of [...yws.docs.entries()]) {
     for (const conn of [...doc.conns.keys()]) {
       const u = users.byId(conn.edUserId);
-      if (!u || u.disabled || (u.epoch || 1) !== conn.edEpoch) { try { conn.close(4001, "session terminée"); } catch (_e) {} continue; }
+      if (!u || u.disabled || (u.epoch || 1) !== conn.edEpoch || (conn.edToken && !sessions.get(conn.edToken))) { try { conn.close(4001, "session terminée"); } catch (_e) {} continue; }
       if (name !== SYSTEM_DOC && !access.can(u, name, "read")) { try { conn.close(4003, "accès retiré"); } catch (_e) {} }
     }
   }
@@ -645,7 +652,8 @@ app.set("trust proxy", trustProxy);
 const INLINE_SCRIPT_HASHES = (() => {
   try {
     const html = fs.readFileSync(path.join(PUBLIC, "index.html"), "utf8");
-    return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${require("crypto").createHash("sha256").update(m[1]).digest("base64")}'`);
+    // le navigateur calcule l'empreinte après avoir ramené les fins de ligne à LF (fichier CRLF sous Windows)
+    return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${require("crypto").createHash("sha256").update(m[1].replace(/\r\n?/g, "\n")).digest("base64")}'`);
   } catch (_e) { return []; }
 })();
 const APP_CSP = [
@@ -739,6 +747,7 @@ app.post("/api/auth/login", async (req, res) => {
 
 app.post("/api/auth/logout", (req, res) => {
   sessions.destroy(tokenOf(req));
+  setImmediate(enforceAccess); // ferme tout de suite les connexions temps réel de cette session
   clearSessionCookie(req, res);
   res.json({ ok: true });
 });
@@ -894,9 +903,11 @@ app.get("/api/raw", async (req, res) => {
     }
     const kind = kindOf(p);
     const ext = path.posix.extname(p).toLowerCase();
-    if (kind === "markdown" || kind === "text") res.set("Content-Type", `${kind === "markdown" ? "text/markdown" : "text/plain"}; charset=utf-8`);
-    else res.type(ext || "bin");
     const inline = req.query.download !== "1" && INLINE_KINDS.has(kind);
+    if (kind === "markdown" || kind === "text") res.set("Content-Type", `${kind === "markdown" ? "text/markdown" : "text/plain"}; charset=utf-8`);
+    // un .js ou .html importé ne doit jamais pouvoir servir de script ou de page à Easydoc
+    else if (inline) res.type(ext || "bin");
+    else res.set("Content-Type", "application/octet-stream");
     res.set("Content-Disposition", `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(path.posix.basename(p))}`);
     res.set("X-Content-Type-Options", "nosniff");
     res.set("Cache-Control", "no-store");
@@ -1372,6 +1383,7 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.edUserId = user.id;
     ws.edEpoch = user.epoch || 1;
+    ws.edToken = tokenOf(req); // déconnexion ou session expirée : la connexion temps réel est coupée
     wss.emit("connection", ws, req);
   });
 });

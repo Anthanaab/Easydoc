@@ -347,6 +347,9 @@ export function createEditor(parent, hooks) {
     const collab = !!ytext;
     return [
       readOnlyComp.of(EditorState.readOnly.of(!!readOnly)),
+      // lecture seule : aucune touche ni commande (Entrée dans une liste, Ctrl+E…) ne modifie le texte ;
+      // seules passent les modifications des autres, reçues du serveur
+      EditorState.transactionFilter.of((tr) => (tr.docChanged && tr.startState.readOnly && !tr.annotation(ySyncAnnotation) ? [] : tr)),
       placeholderComp.of(cmPlaceholder(placeholder || "")),
       EditorView.lineWrapping,
       Prec.high(keymap.of([...(md ? formatKeymap : []), ...(md ? markdownKeymap : [])])),

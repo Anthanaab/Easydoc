@@ -179,6 +179,8 @@ function renderMe() {
 }
 
 function applyTheme(t) {
+  // valeur absente ou invalide (ex. « undefined » laissé par une ancienne version) : thème du système
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   document.documentElement.dataset.theme = t;
   localStorage.setItem("ed-theme", t);
   const b = $("#btnTheme [data-icon]");

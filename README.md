@@ -198,7 +198,13 @@ Proxmox, `bash easydoc-lxc.sh reset-password <identifiant>`) affiche un nouveau 
 - Les droits sont vérifiés côté serveur sur chaque requête et chaque message temps réel ; le nom
   inscrit dans les commits est celui du compte connecté (impossible à usurper).
 - Les chemins de fichiers sont validés (impossible de lire ou d'écrire en dehors du dépôt, ni
-  les fichiers cachés comme `.git` ou `.env`).
+  les fichiers cachés comme `.git` ou `.env`). Un lien symbolique placé dans le dépôt local ne
+  mène pas ailleurs sur le serveur. Sur un disque qui ne distingue pas les majuscules (Windows,
+  macOS), `INTERNE/` et `Interne/` sont le même dossier, avec les mêmes droits ; les noms que
+  Windows lit autrement (point ou espace final, noms courts `~1`) sont refusés.
+- Les fichiers importés qui ne s'affichent pas dans la page (`.js`, `.html`…) sont toujours
+  servis en téléchargement, jamais comme script ou page d'Easydoc.
+- Se déconnecter coupe aussi les connexions temps réel de la session.
 - En-têtes de sécurité : interdiction d'afficher Easydoc dans la page d'un autre site
   (*clickjacking*), scripts limités à ceux d'Easydoc (CSP), `nosniff`, pas de fuite d'adresse.
 - Dépendances vérifiées avec `npm audit` (aucune vulnérabilité connue à la publication).

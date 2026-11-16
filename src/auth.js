@@ -249,7 +249,22 @@ class AccessStore {
     const d = readJson(file, null);
     this.rules = d && d.rules && typeof d.rules === "object" ? d.rules : { "": { "*": "write" } };
   }
-  save() { writeJsonSecure(this.file, { rules: this.rules }); }
+  save() { this._ci = null; writeJsonSecure(this.file, { rules: this.rules }); }
+
+  /**
+   * Règle d'un chemin. Sur un disque qui ne distingue pas les majuscules (Windows, macOS),
+   * « Interne » et « INTERNE » désignent le même dossier : la règle s'applique aux deux.
+   */
+  rule(p) {
+    if (!this.caseInsensitive()) return this.rules[p];
+    if (!this._ci || this._ciSrc !== this.rules) {
+      this._ci = new Map(Object.entries(this.rules).map(([k, v]) => [k.toLowerCase(), v]));
+      this._ciSrc = this.rules;
+    }
+    return this._ci.get(p.toLowerCase());
+  }
+  /** Remplacé par le serveur : vrai si le dépôt est sur un disque insensible à la casse. */
+  caseInsensitive() { return false; }
 
   /** Niveau effectif d'un utilisateur sur un chemin (fichier ou dossier). */
   level(user, p) {
@@ -257,7 +272,7 @@ class AccessStore {
     if (user.role === "admin") return "write";
     const segs = p ? String(p).split("/") : [];
     for (let i = segs.length; i >= 0; i--) {
-      const r = this.rules[segs.slice(0, i).join("/")];
+      const r = this.rule(segs.slice(0, i).join("/"));
       if (!r) continue;
       const own = r[`user:${user.username}`];
       if (own) return own;
