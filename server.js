@@ -26,7 +26,7 @@ const { safeDocPath, safeFilePath, isEditable, kindOf } = require("./src/paths")
 const convert = require("./src/convert");
 const auth = require("./src/auth");
 const authorship = require("./src/authorship");
-const { CommentStore } = require("./src/comments");
+const { CommentStore, locate: locateQuote, context: quoteContext } = require("./src/comments");
 const { TunnelManager } = require("./src/tunnel");
 const { Updater } = require("./src/updater");
 const pkg = require("./package.json");
@@ -121,6 +121,11 @@ function sameOrigin(req) {
 const authorStore = new authorship.AuthorshipStore(path.join(DATA_DIR, "authorship"));
 // ---- Commentaires (façon Google Docs, par document) --------------------------------------------
 const comments = new CommentStore(path.join(DATA_DIR, "comments.json"));
+/** Prévient les navigateurs qui ont le document ouvert : ils rechargent ses commentaires. */
+function notifyComments(name) {
+  const doc = yws.docs.get(name);
+  if (doc) doc.transact(() => doc.getMap("meta").set("commentsAt", Date.now()), SERVER);
+}
 const repoKey = () => (repo.mode === "github" ? `github:${repo.options.githubRepo}@${repo.options.githubBranch}` : "local");
 const keyOfCommit = (c) => authorship.keyFromCommit(c, users);
 const keyOfUser = (u) => `u:${u.username}`;
@@ -303,6 +308,7 @@ function commitDoc(name, extraAuthor, docArg) {
       s.dirty = still;
       s.firstDirty = still ? Date.now() : 0;
       if (still) scheduleSave(name);
+      comments.refresh(name, doc.getText(TEXT).toString());
       doc.transact(() => {
         meta.set("savedAt", Date.now());
         meta.set("savedBy", authors.join(", "));
@@ -346,6 +352,7 @@ yws.setPersistence({
         init.later.then((segs) => applyLater(name, doc, content, segs))
           .catch((e) => console.error(`[auteurs] historique de ${name} indisponible : ${e.message}`));
       }
+      comments.anchorAll(name, doc.getText(TEXT).toString());
       s.lastCommitted = file ? content : null;
       s.lastRemote = s.lastCommitted;
       s.baseUpdate = Y.encodeStateAsUpdate(doc);
@@ -356,6 +363,8 @@ yws.setPersistence({
     }
     // Texte tapé dans un navigateur : marqué au nom du compte de la connexion.
     const ytext = doc.getText(TEXT);
+    // les passages commentés suivent toutes les modifications (frappe, dépôt, restauration…)
+    ytext.observe((ev) => comments.shift(name, ev.delta));
     ytext.observe((ev) => {
       const origin = ev.transaction.origin;
       if (!origin || !origin.edUserId) return;
@@ -383,6 +392,8 @@ yws.setPersistence({
   writeState: async (name, doc) => {
     if (name === SYSTEM_DOC) return;
     if (st(name).dirty) await commitDoc(name, null, doc).catch(() => {});
+    comments.refresh(name, doc.getText(TEXT).toString());
+    comments.flush();
   },
 });
 
@@ -960,52 +971,102 @@ app.get("/api/history/diff", async (req, res) => {
   } catch (e) { bad(res, 400, e.message); }
 });
 
-app.get("/api/comments", async (req, res) => {
-  const p = safeFilePath(String(req.query.path || ""));
-  if (!p) return bad(res, 400, "Chemin invalide.");
-  if (!allow(req, res, p, "read")) return;
+// ---- Commentaires -------------------------------------------------------------------------------
+const commentKey = (u) => `u:${u.username}`;
+const commentBody = (req) => req.body || {};
+/** Chemin d'un document commentable (Markdown / texte), avec le droit demandé. */
+function commentPath(req, res, raw, need) {
+  const p = safeFilePath(String(raw || ""));
+  if (!p || !isEditable(p)) { bad(res, 400, "Chemin invalide."); return null; }
+  return allow(req, res, p, need) ? p : null;
+}
+/** Texte actuel du document : celui du document ouvert, sinon celui du dépôt. */
+async function currentText(p) {
+  const live = yws.docs.get(p);
+  if (live && live.getMap("meta").get("loaded")) return live.getText(TEXT).toString();
+  const f = await repo.readFile(p);
+  return f ? f.content : "";
+}
+const canModerate = (req, item) => item.author === commentKey(req.user) || req.user.role === "admin";
+
+app.get("/api/comments", (req, res) => {
+  const p = commentPath(req, res, req.query.path, "read");
+  if (!p) return;
+  // document ouvert : passages à jour (texte modifié à l'intérieur d'un passage commenté)
+  const live = yws.docs.get(p);
+  if (live && live.getMap("meta").get("loaded")) comments.refresh(p, live.getText(TEXT).toString());
   res.json({ ok: true, comments: comments.all(p), path: p });
 });
 
+// Nouveau fil, ancré sur un passage du document.
 app.post("/api/comments", async (req, res) => {
-  const p = safeFilePath(String((req.body && req.body.path) || ""));
-  if (!p) return bad(res, 400, "Chemin invalide.");
-  if (!allow(req, res, p, "write")) return;
-  const text = String((req.body && req.body.text) || "").trim();
+  const b = commentBody(req);
+  const p = commentPath(req, res, b.path, "write");
+  if (!p) return;
+  const text = String(b.text || "").trim();
   if (!text) return bad(res, 400, "Commentaire vide.");
-  const c = comments.add(p, {
-    author: `u:${req.user.username}`,
-    authorName: req.user.displayName,
-    color: String((req.body && req.body.color) || "").slice(0, 12),
-    text,
-    line: Number((req.body && req.body.line) || 0),
-    start: Number((req.body && req.body.start) || 0),
-    end: Number((req.body && req.body.end) || 0),
-    snippet: String((req.body && req.body.snippet) || "").slice(0, 200),
-  });
-  res.json({ ok: true, comment: c });
+  const quote = String(b.quote || "");
+  if (!quote.trim()) return bad(res, 400, "Sélectionne d'abord le passage à commenter.");
+  try {
+    const doc = await currentText(p);
+    // le texte a pu bouger depuis la sélection : on retrouve le passage autour de la position donnée
+    const at = locateQuote(doc, { quote, start: Number.isInteger(b.start) ? b.start : 0, prefix: String(b.prefix || ""), suffix: String(b.suffix || "") });
+    if (!at) return bad(res, 409, "Le passage sélectionné a changé entre-temps : sélectionne-le à nouveau.");
+    const c = comments.add(p, {
+      author: commentKey(req.user), authorName: req.user.displayName, color: b.color, text,
+      start: at[0], end: at[1], quote, ...quoteContext(doc, at[0], at[1]),
+    });
+    notifyComments(p);
+    res.json({ ok: true, comment: c });
+  } catch (e) { bad(res, 500, e.message); }
 });
 
-app.post("/api/comments/resolve", async (req, res) => {
-  const p = safeFilePath(String((req.body && req.body.path) || ""));
-  if (!p) return bad(res, 400, "Chemin invalide.");
-  if (!allow(req, res, p, "write")) return;
-  const id = String((req.body && req.body.id) || "");
-  const resolved = !!((req.body && req.body.resolved) !== false);
-  const c = comments.setResolved(p, id, resolved);
+app.post("/api/comments/reply", (req, res) => {
+  const b = commentBody(req);
+  const p = commentPath(req, res, b.path, "write");
+  if (!p) return;
+  const text = String(b.text || "").trim();
+  if (!text) return bad(res, 400, "Réponse vide.");
+  const r = comments.reply(p, String(b.id || ""), { author: commentKey(req.user), authorName: req.user.displayName, color: b.color, text });
+  if (!r) return bad(res, 404, "Commentaire introuvable.");
+  notifyComments(p);
+  res.json({ ok: true, reply: r });
+});
+
+app.patch("/api/comments", (req, res) => {
+  const b = commentBody(req);
+  const p = commentPath(req, res, b.path, "write");
+  if (!p) return;
+  const text = String(b.text || "").trim();
+  if (!text) return bad(res, 400, "Commentaire vide.");
+  const it = comments.item(p, String(b.id || ""), b.replyId ? String(b.replyId) : null);
+  if (!it) return bad(res, 404, "Commentaire introuvable.");
+  if (it.author !== commentKey(req.user)) return bad(res, 403, "Tu ne peux modifier que tes propres commentaires.");
+  comments.edit(p, String(b.id), b.replyId ? String(b.replyId) : null, text);
+  notifyComments(p);
+  res.json({ ok: true });
+});
+
+app.post("/api/comments/resolve", (req, res) => {
+  const b = commentBody(req);
+  const p = commentPath(req, res, b.path, "write");
+  if (!p) return;
+  const c = comments.setResolved(p, String(b.id || ""), b.resolved !== false, req.user.displayName);
   if (!c) return bad(res, 404, "Commentaire introuvable.");
+  notifyComments(p);
   res.json({ ok: true, comment: c });
 });
 
-app.delete("/api/comments", async (req, res) => {
-  const p = safeFilePath(String((req.query && req.query.path) || ""));
-  if (!p) return bad(res, 400, "Chemin invalide.");
-  if (!allow(req, res, p, "write")) return;
-  const id = String((req.query && req.query.id) || "");
-  const c = comments.all(p).find((x) => x.id === id);
-  if (c && c.author !== `u:${req.user.username}` && req.user.role !== "admin") return bad(res, 403, "Vous ne pouvez supprimer que vos propres commentaires.");
-  const ok = comments.remove(p, id);
-  res.json({ ok });
+app.delete("/api/comments", (req, res) => {
+  const p = commentPath(req, res, req.query.path, "write");
+  if (!p) return;
+  const id = String(req.query.id || ""), replyId = req.query.replyId ? String(req.query.replyId) : null;
+  const it = comments.item(p, id, replyId);
+  if (!it) return bad(res, 404, "Commentaire introuvable.");
+  if (!canModerate(req, it)) return bad(res, 403, "Tu ne peux supprimer que tes propres commentaires.");
+  comments.remove(p, id, replyId);
+  notifyComments(p);
+  res.json({ ok: true });
 });
 
 // Restaure un document à une version antérieure de son historique.
@@ -1069,6 +1130,7 @@ app.delete("/api/file", async (req, res) => {
       doc.transact(() => doc.getMap("meta").set("deleted", Date.now()), SERVER);
       setTimeout(() => detachDoc(p, doc), 300); // laisse le temps aux clients de voir « supprimé »
     }
+    comments.clearPath(p);
     states.delete(p); // l'annexe des auteurs est conservée : si le fichier est remis, son texte retrouve ses auteurs
     bump("treeVersion");
     res.json({ ok: true, deleted: r.deleted });
@@ -1212,6 +1274,7 @@ wss.on("connection", (conn, req) => {
 async function beforeExit() {
   try { await Promise.race([flushAll(), new Promise((r) => setTimeout(r, 8000))]); } catch (_e) {}
   sessions.flush();
+  try { comments.flush(); } catch (_e) {}
   try { await tunnel.stop(true); } catch (_e) {}
 }
 async function shutdown(sig) {

@@ -289,9 +289,18 @@ body.dragging .dropzone { display: flex; }
 
 .only-mobile { display: none; }
 .scrim { display: none; }
-@media (max-width: 900px) {
+/* La barre d'outils se compacte selon la largeur de la zone principale (barre latérale déduite) */
+.main { container: main / inline-size; }
+.topbar { min-width: 0; overflow: hidden; }
+.segmented button { white-space: nowrap; }
+@container main (max-width: 860px) {
   .segmented .lbl, #btnSave .lbl { display: none; }
+}
+@container main (max-width: 720px) {
   .status { display: none; }
+}
+@container main (max-width: 560px) {
+  .presence { display: none; }
 }
 @media (max-width: 760px) {
   .only-mobile { display: inline-flex; }
@@ -441,59 +450,88 @@ details.tlogs pre { margin: 8px 0 0; max-height: 220px; overflow: auto; padding:
   padding: 12px 18px; border-radius: 10px; background: var(--text); color: var(--bg); font-weight: 600; box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
 .update-banner svg.i { width: 18px; height: 18px; }
 
-/* ---- Panneau de commentaires (façon Google Docs) ---- */
-.comments-panel {
-  position: absolute; top: 52px; right: 0; bottom: 0; width: min(360px, 92vw);
-  background: var(--bg); border-left: 1px solid var(--line); z-index: 40;
-  display: flex; flex-direction: column; box-shadow: -12px 0 30px rgba(0,0,0,.12);
-}
+/* ---- Commentaires (façon Google Docs) ---- */
+/* Marge : le texte se décale à gauche pour laisser la place aux cartes */
+.pane-preview { position: relative; }
+.area.has-rail #editor { width: calc(100% - 300px); margin: 0 0 0 max(0px, calc((100% - 1180px) / 2)); }
+.area.has-rail .prose { width: calc(100% - 300px); margin: 0 0 0 max(0px, calc((100% - 1120px) / 2)); }
+.c-rail { position: absolute; top: 0; width: 272px; z-index: 3; }
+body.rail-on .toc:not(.forced) { display: none; }
+.c-rail .c-card { position: absolute; left: 0; right: 0; transition: top .16s ease, transform .16s ease, box-shadow .16s ease; }
+.c-rail .c-card.active { transform: translateX(-12px); z-index: 1; }
+
+/* Carte d'une discussion */
+.c-card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .05); cursor: pointer; }
+.c-card:hover { box-shadow: 0 2px 8px rgba(0, 0, 0, .09); }
+.c-card.active { cursor: default; border-color: transparent; box-shadow: 0 6px 22px rgba(0, 0, 0, .15), 0 1px 3px rgba(0, 0, 0, .08); }
+:root[data-theme="dark"] .c-card { background: var(--bg-soft); }
+:root[data-theme="dark"] .c-card.active { border-color: var(--line-strong); box-shadow: 0 6px 22px rgba(0, 0, 0, .5); }
+.c-card.resolved { opacity: .75; }
+.c-item + .c-item, .c-item + .c-more { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.c-head { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.c-head .avatar { width: 28px; height: 28px; font-size: 11px; }
+.c-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.c-who b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-who span { font-size: 11.5px; color: var(--muted); }
+.c-acts { display: flex; gap: 1px; opacity: 0; transition: opacity .12s; }
+.c-card:hover .c-acts, .c-card.active .c-acts, .c-card.in-panel .c-acts { opacity: 1; }
+.c-acts .icon-btn { width: 26px; height: 26px; }
+.c-acts .icon-btn svg.i { width: 15px; height: 15px; }
+.c-text { margin-top: 6px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.c-text a { color: var(--accent-text); text-decoration: underline; }
+.c-rail .c-card:not(.active) .c-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.c-more { font-size: 12px; font-weight: 500; color: var(--accent-text); }
+.c-quote { margin-bottom: 8px; padding-left: 8px; border-left: 3px solid var(--cc); color: var(--muted); font-size: 12.5px;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.6em; overflow: hidden; }
+.c-lost { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; background: var(--bg-hover); color: var(--text-2); font-size: 11px; }
+.c-resolved { display: flex; align-items: center; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.c-resolved svg.i { width: 14px; height: 14px; }
+.c-reply, .c-form { margin-top: 10px; }
+.c-card.draft textarea { margin-top: 8px; }
+.c-card textarea.c-in { display: block; width: 100%; min-height: 34px; padding: 7px 10px; resize: none; font: inherit; line-height: 1.45; border-radius: 8px; }
+.c-btns { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.c-btns[hidden] { display: none; }
+.btn.sm { height: 28px; padding: 0 12px; font-size: 12.5px; }
+
+/* Bouton « + » à côté de la sélection */
+.c-add { position: absolute; z-index: 4; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--bg); color: var(--accent); box-shadow: 0 2px 10px rgba(0, 0, 0, .16); display: inline-flex; align-items: center; justify-content: center; }
+.c-add:hover { background: var(--accent-soft); }
+.c-add[hidden] { display: none; }
+.c-add svg.i { width: 18px; height: 18px; }
+.c-add b { position: absolute; top: 3px; right: 5px; font-size: 13px; line-height: 1; }
+
+/* Passages commentés : éditeur (calque) et aperçu */
+.overlay .ca { background: color-mix(in srgb, var(--ca) 15%, transparent); box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--ca) 75%, transparent); border-radius: 2px; }
+.overlay .ca.multi { background: color-mix(in srgb, var(--ca) 24%, transparent); }
+.overlay .ca.on { background: color-mix(in srgb, var(--ca) 34%, transparent); }
+.prose mark.cmark { color: inherit; padding: 0; border-radius: 2px; cursor: pointer;
+  background: color-mix(in srgb, var(--ca) 15%, transparent); box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--ca) 75%, transparent); }
+.prose mark.cmark.on { background: color-mix(in srgb, var(--ca) 34%, transparent); }
+
+/* Pastille du bouton de la barre d'outils */
+#btnComments { position: relative; }
+#btnComments.on { background: var(--accent-soft); color: var(--accent-text); }
+.c-badge { position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px var(--bg); }
+.c-badge[hidden] { display: none; }
+
+/* Panneau « tous les commentaires » (à droite du texte, sans le recouvrir) */
+.comments-panel { flex: none; width: 340px; display: flex; flex-direction: column; min-height: 0; background: var(--bg-soft); border-left: 1px solid var(--line); }
 .comments-panel[hidden] { display: none; }
-.comments-panel .cc-headbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-  border-bottom: 1px solid var(--line); font-weight: 600; }
-.comments-panel .cc-headbar h3 { margin: 0; font-size: 14px; flex: 1; }
-.comments-list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-.comments-list .muted-sm { color: var(--muted); font-size: 13px; }
-.comment { border: 1px solid var(--line); border-left: 3px solid var(--cc, #888);
-  border-radius: 8px; padding: 10px; background: var(--bg); }
-.comment.resolved { opacity: .55; }
-.comment .cc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.comment .cc-name { font-weight: 600; font-size: 13px; }
-.comment .cc-line { font-size: 11px; color: var(--cc, #888); background: color-mix(in srgb, var(--cc, #888) 15%, transparent);
-  padding: 1px 6px; border-radius: 10px; }
-.comment .cc-time { font-size: 11px; color: var(--muted); margin-left: auto; }
-.comment .cc-actions { display: flex; gap: 2px; }
-.comment .cc-body { font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; margin: 2px 0 4px; }
-.comment .cc-resolved-tag { display: inline-block; font-size: 11px; color: var(--muted);
-  border: 1px solid var(--line); padding: 1px 7px; border-radius: 10px; }
-.comments-panel .cc-compose { display: flex; flex-direction: column; gap: 8px; padding: 12px;
-  border-top: 1px solid var(--line); background: var(--bg); }
-.comments-panel .cc-compose textarea { width: 100%; resize: vertical; min-height: 44px; }
-.btnComments.on, #btnComments.on { background: var(--accent-soft); color: var(--accent); }
-
-
-
-/* ---- Cartes de commentaires dépliées dans l'aperçu ---- */
-.prose .doc-comment { display: flex; gap: 8px; align-items: flex-start; margin: .35em 0 1em;
-  padding: 8px 12px; border: 1px solid var(--line); border-left: 3px solid var(--cc, #0891b2);
-  border-radius: 8px; background: var(--bg-soft); font-size: 13.5px; }
-.prose .doc-comment .dc-body { flex: 1; }
-.prose .doc-comment .dc-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
-.prose .doc-comment .dc-author { font-weight: 600; color: var(--text-2); }
-.prose .doc-comment .dc-text { color: var(--text); line-height: 1.5; }
-.prose .doc-comment .dc-snippet { font-size: 12px; color: var(--muted); font-style: italic; margin-bottom: 3px; }
-.prose .doc-comment.resolved { opacity: .55; }
-.prose .doc-comment.resolved .dc-text { text-decoration: line-through; }
-.prose .doc-comment .dc-resolved { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 0 6px; }
-
-/* ---- Surlignage du passage commenté dans l'éditeur ---- */
-.overlay .ca { background: color-mix(in srgb, var(--ca) 16%, transparent); box-shadow: inset 0 -2px 0 var(--ca); border-radius: 2px; }
-
-/* ---- Survol du passage souligné : infobulle flottante ---- */
-.ctip { position: fixed; z-index: 120; max-width: 320px; background: var(--bg); color: var(--text);
-  border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.22);
-  padding: 8px 11px; display: none; flex-direction: column; gap: 3px; }
-.ctip .ct-a { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; }
-.ctip .ct-a i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.ctip .ct-t { font-size: 13px; line-height: 1.45; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+.area[data-state="empty"] .comments-panel, .area[data-state="file"] .comments-panel { display: none; }
+.cc-headbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px 16px; }
+.cc-headbar h3 { flex: 1; margin: 0; font-size: 14px; font-weight: 650; }
+.cc-tabs { display: flex; gap: 4px; padding: 0 12px 8px; border-bottom: 1px solid var(--line); }
+.cc-tabs button { border: 0; background: none; padding: 5px 10px; border-radius: 6px; color: var(--text-2); font-size: 13px; font-weight: 500; }
+.cc-tabs button.on { background: var(--bg-hover); color: var(--text); }
+.cc-tabs .n { color: var(--muted); font-weight: 400; margin-left: 2px; }
+.comments-list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.comments-list .muted-sm { color: var(--muted); font-size: 13px; line-height: 1.5; }
+@media (max-width: 760px) {
+  .area { position: relative; }
+  .comments-panel { position: absolute; top: 0; right: 0; bottom: 0; z-index: 40; width: min(360px, 92vw); box-shadow: -12px 0 30px rgba(0, 0, 0, .15); }
+}
 
 

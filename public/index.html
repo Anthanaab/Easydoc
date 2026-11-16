@@ -71,7 +71,7 @@
         </div>
         <button class="icon-btn" id="btnCopyLink" title="Copier le lien vers ce document (Ctrl+L)" hidden><span data-icon="link"></span></button>
         <button class="icon-btn" id="btnToc" title="Table des matières (aperçu)" hidden><span data-icon="list"></span></button>
-        <button class="icon-btn" id="btnComments" title="Commentaires (comme Google Docs)" hidden><span data-icon="comment"></span></button>
+        <button class="icon-btn" id="btnComments" title="Tous les commentaires" hidden><span data-icon="comment"></span><span class="c-badge" id="ccBadge" hidden></span></button>
         <button class="icon-btn" id="btnAuthors" title="Qui a écrit quoi : couleur par auteur" aria-pressed="false" hidden><span data-icon="highlight"></span></button>
         <button class="icon-btn" id="btnHistory" title="Historique des modifications" hidden><span data-icon="history"></span></button>
         <button class="icon-btn" id="btnAccess" title="Qui peut voir ou modifier ce fichier" hidden><span data-icon="lock"></span></button>
@@ -99,15 +99,18 @@
           <article class="prose" id="preview"></article>
         </div>
         <div class="pane pane-file" id="paneFile"></div>
+        <aside class="comments-panel" id="commentsPanel" hidden>
+          <div class="cc-headbar">
+            <h3>Commentaires</h3>
+            <button class="icon-btn sm" id="btnCommentsClose" title="Fermer"><span data-icon="x"></span></button>
+          </div>
+          <div class="cc-tabs" role="tablist">
+            <button data-tab="open" class="on">Ouverts <span class="n" id="ccOpenN"></span></button>
+            <button data-tab="resolved">Résolus <span class="n" id="ccDoneN"></span></button>
+          </div>
+          <div class="comments-list" id="commentsList"></div>
+        </aside>
       </section>
-      <aside class="comments-panel" id="commentsPanel" hidden>
-        <div class="cc-headbar"><h3>${""}Commentaires</h3><button class="icon-btn sm" id="btnCommentsClose" title="Fermer">${""}</button></div>
-        <div class="comments-list" id="commentsList"></div>
-        <form class="cc-compose" id="commentForm" autocomplete="off">
-          <textarea id="commentInput" class="input" rows="2" placeholder="Ajouter un commentaire (sur la sélection / la ligne courante)…"></textarea>
-          <button class="btn btn-primary" type="submit">Commenter</button>
-        </form>
-      </aside>
     </main>
   </div>
 

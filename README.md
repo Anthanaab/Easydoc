@@ -16,6 +16,13 @@ en train d'être tapé.
 - **Qui a écrit quoi** (bouton surligneur) : chaque passage est coloré selon son auteur, avec la
   part de chacun et, au survol, le nom et la date. Les modifications de **Claude** (commits avec
   `Co-Authored-By: Claude`, ajouté par défaut par Claude Code) apparaissent sous son nom.
+- **Commentaires façon Google Docs** : sélectionne un passage (dans l'éditeur ou l'aperçu) puis le
+  bouton **+** qui apparaît à droite (ou `Ctrl+Alt+M`). Les discussions s'affichent dans la marge,
+  en face de leur passage ; on peut répondre, modifier ses messages, résoudre ou rouvrir une
+  discussion. Le passage commenté suit les modifications de tout le monde (y compris celles de
+  Claude ou d'un `git push`) et les nouveaux commentaires apparaissent en direct chez chacun.
+  Le bouton *Commentaires* liste toutes les discussions (ouvertes ou résolues). Les commentaires
+  restent sur le serveur (`data/comments.json`), jamais dans le dépôt.
 - **Historique** : chaque enregistrement d'un fichier, avec son auteur et le détail des lignes
   ajoutées ou supprimées.
 - **Enregistrement automatique** quelques secondes après la dernière frappe : un seul commit

@@ -502,6 +502,7 @@ function closeSession() {
   renderAuthorsBar(null);
   hideTip();
   $("#paneFile").innerHTML = "";
+  resetComments();
   if (!S) return;
   const s = S;
   S = null;
@@ -576,6 +577,7 @@ function openFile(path, opts = {}) {
     } else if (ev.code === 4001) sessionLost();
   });
 
+  s.ytext.observe((ev) => { if (S === s && s.loaded) shiftComments(ev.delta); }); // passages commentés
   s.ytext.observe(() => { if (S === s) renderOverlay(); }); // couleurs des auteurs
   provider.awareness.on("change", () => { if (S === s) renderOverlay(); }); // curseurs des autres
   s.ytext.observe((event) => {
@@ -600,6 +602,7 @@ function openFile(path, opts = {}) {
       toast(by && by !== "Modification externe" ? `Document mis à jour depuis le dépôt par ${by}.` : "Document mis à jour depuis le dépôt (modification externe).");
     }
     if (keys.has("deleted")) { toast("Ce document a été supprimé."); refreshTree(); showEmpty(); return; }
+    if (keys.has("commentsAt") && s.loaded) loadComments(); // commentaires ajoutés / modifiés par quelqu'un
     renderStatus();
   });
 
@@ -628,7 +631,7 @@ function onLoaded(s) {
   }
   s.pendingText = null;
   s.savedSeen = Date.now();
-  renderPreview(); renderStatus(); updateButtons(); renderOverlay(); publishCursor();
+  renderPreview(); renderTOC(); renderStatus(); updateButtons(); renderOverlay(); publishCursor();
   // charge les commentaires dès l'ouverture pour afficher les bulles en édition comme en côte-à-côte
   loadComments();
 }
@@ -729,7 +732,7 @@ function publishLine() {
   }, 250);
 }
 ["keyup", "click", "select"].forEach((ev) => ta.addEventListener(ev, publishLine));
-window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderOverlay(); } });
+window.addEventListener("resize", () => { if (S && S.loaded) { autosize(); renderRail(); } });
 
 /* ============================================================================================
  * Visionneuse (PDF, Word, images, autres fichiers)
@@ -957,7 +960,7 @@ function remoteCursors() {
 function drawOverlay() {
   const live = S && S.loaded && !S.offline && !S.reconnecting && currentView() !== "preview";
   const text = live ? ta.value : "";
-  if (!live || text !== S.ytext.toString()) { overlay.innerHTML = ""; renderAuthorsBar(null); return; }
+  if (!live || text !== S.ytext.toString()) { overlay.innerHTML = ""; renderAuthorsBar(null); afterOverlay(); return; }
   const cursors = remoteCursors();
   const runs = []; // [début, fin, auteur, minute]
   if (showAuthors) {
@@ -969,17 +972,11 @@ function drawOverlay() {
       i += op.insert.length;
     }
   }
-  // plages saillignées par les commentaires liés à un passage (toujours visibles)
-  commentAnchors = [];
-  for (let ci = 0; ci < commentsList.length; ci++) {
-    const c = commentsList[ci];
-    if (c.resolved || c.start == null || c.end == null || c.end <= c.start) continue;
-    const s = Math.min(c.start, c.end), e = Math.max(c.start, c.end);
-    if (e > text.length || s < 0) continue;
-    commentAnchors.push({ s, e, color: c.color || "#dc2626", c, ci });
-  }
+  // passages commentés (toujours visibles) et repère de ma sélection (bouton « commenter »)
+  const anchors = commentAnchors(text.length);
+  const selMark = commentSelMark(text.length);
   renderAuthorsBar(showAuthors ? runs : null);
-  if (!runs.length && !cursors.length && !commentAnchors.length) { overlay.innerHTML = ""; return; }
+  if (!runs.length && !cursors.length && !anchors.length && selMark == null) { overlay.innerHTML = ""; afterOverlay(); return; }
 
   // copie exacte de la mise en page du textarea
   const cs = getComputedStyle(ta);
@@ -1003,7 +1000,8 @@ function drawOverlay() {
       sels.push([s, e, c.color]); pts.add(s); pts.add(e);
     }
   }
-  for (const a of commentAnchors) { pts.add(a.s); pts.add(a.e); }
+  for (const a of anchors) { pts.add(a.s); pts.add(a.e); }
+  if (selMark != null) pts.add(selMark);
   const sorted = [...pts].filter((p) => p >= 0 && p <= text.length).sort((a, b) => a - b);
   let html = "", ri = 0;
   for (let k = 0; k < sorted.length; k++) {
@@ -1011,6 +1009,7 @@ function drawOverlay() {
     for (const c of caretsAt.get(p) || []) {
       html += `<span class="rc" style="--c:${esc(c.color)}"><span class="rc-flag">${esc(c.name)}</span></span>`;
     }
+    if (p === selMark) html += `<span class="selmark"></span>`;
     if (k === sorted.length - 1) break;
     const q = sorted[k + 1];
     const seg = text.slice(p, q);
@@ -1027,75 +1026,18 @@ function drawOverlay() {
       attrs += ` data-a="${esc(run[2])}" data-t="${run[3]}"`;
     }
     if (sel) { cls.push("sel"); styles.push(`--s:${sel[2]}`); }
-    const ca = commentAnchors.find((a) => a.s <= p && q <= a.e);
-    if (ca) { cls.push("ca"); styles.push(`--ca:${esc(ca.color)}`); attrs += ` data-ci="${ca.ci}"`; }
+    const over = anchors.filter((a) => a.s <= p && q <= a.e);
+    if (over.length) {
+      const top = over.find((a) => a.on) || over[0];
+      cls.push("ca"); if (top.on) cls.push("on"); if (over.length > 1) cls.push("multi");
+      styles.push(`--ca:${esc(top.color)}`);
+      attrs += ` data-cids="${esc(over.map((a) => a.id).join(" "))}"`;
+    }
     html += cls.length ? `<span class="${cls.join(" ")}" style="${styles.join(";")}"${attrs}>${esc(seg)}</span>` : esc(seg);
   }
   overlay.innerHTML = html + "\u200b";
+  afterOverlay();
 }
-
-// plages saillignées par les commentaires liés à un passage (remplies par drawOverlay, relues au survol)
-let commentAnchors = [];
-
-// Affiche une infobulle flottante au survol d'un passage commenté.
-let _ctip = null;
-function commentTip() {
-  if (!_ctip) {
-    _ctip = document.body.appendChild(document.createElement("div"));
-    _ctip.className = "ctip";
-    _ctip.style.display = "none";
-  }
-  return _ctip;
-}
-function hideCommentTip() { const t = commentTip(); t.style.display = "none"; t._hideCi = null; }
-
-// Convertit la position d'un clic/survol (relatif à l'éditeur) en offset de caractère dans le texte.
-function pointToOffset(x, y) {
-  if (!ta.value) return -1;
-  const cs = getComputedStyle(ta);
-  const padL = parseFloat(cs.paddingLeft) || 0;
-  const padT = parseFloat(cs.paddingTop) || 0;
-  const lh = parseFloat(cs.lineHeight) || 16;
-  // ligne et colonne approximatives (lignes simples, sans wrap replié)
-  const relY = y - padT;
-  const relX = x - padL;
-  const row = Math.max(0, Math.floor(relY / lh));
-  const lines = ta.value.split("\n");
-  let off = 0;
-  if (row >= lines.length) return ta.value.length;
-  for (let i = 0; i < row; i++) off += lines[i].length + 1;
-  // colonne → caractère (approx mono-espace via width moyenne)
-  const avgChar = (cs.fontSize ? parseFloat(cs.fontSize) * 0.55 : 8);
-  off += Math.max(0, Math.min(Math.round(relX / avgChar), lines[row].length));
-  return off;
-}
-
-// Détecte un commentaire sous la souris et affiche l'infobulle ; cache sinon.
-function hoverCommentAt(clientX, clientY) {
-  const r = paneEditor.getBoundingClientRect();
-  const x = clientX - r.left, y = clientY - r.top;
-  if (x < 0 || y < 0 || !S || !S.loaded) { hideCommentTip(); return; }
-  const off = pointToOffset(x, y);
-  let found = null;
-  for (const a of commentAnchors) {
-    if (!a.c.resolved && off >= a.s - 1 && off <= a.e) { found = a; break; }
-  }
-  if (!found) { hideCommentTip(); return; }
-  const c = found.c;
-  const tip = commentTip();
-  if (tip._hideCi === c.id) return;
-  tip.innerHTML = `<span class="ct-a"><i style="background:${esc(c.color || "#0891b2")}"></i>${esc(c.authorName || c.author)}</span><span class="ct-t">${esc(c.text)}</span>`;
-  tip.style.display = "block";
-  tip._hideCi = c.id;
-  const tw = tip.offsetWidth;
-  const tx = Math.min(window.innerWidth - tw - 12, clientX - r.left + r.left + 12);
-  const ty = clientY - r.top + r.top - tip.offsetHeight - 8;
-  tip.style.left = Math.max(8, tx) + "px";
-  tip.style.top = Math.max(6, ty) + "px";
-}
-// Le survol de la zone d'édition déclenche l'infobulle dès qu'on passe sur un passage commenté.
-paneEditor.addEventListener("mousemove", (e) => hoverCommentAt(e.clientX, e.clientY), { passive: true });
-paneEditor.addEventListener("mouseleave", hideCommentTip);
 
 function renderAuthorsBar(runs) {
   const bar = $("#authorsBar");
@@ -1338,7 +1280,7 @@ function renderTOC() {
   } catch (e) { console.error("toc ERREUR:", e); }
 }
 function closeToc() { if (tocBar) { tocBar._obs && tocBar._obs.disconnect(); tocBar.remove(); tocBar = null; } }
-$("#btnToc").onclick = () => renderTOC();
+$("#btnToc").onclick = () => { renderTOC(); if (tocBar) tocBar.classList.add("forced"); }; // affiché même par-dessus la marge des commentaires
 
 // Renvoie la liste des numéros de ligne (1-based) des titres ATX (#…, H1-H4) du markdown source,
 // dans l'ordre correspondant aux <h*> générés par marked.parse (titres de type setext ignorés :
@@ -1372,6 +1314,7 @@ function showShortcuts() {
       <tr><td>${svg("search")} ${kbd("Ctrl K")}</td><td>Rechercher un document / dans le contenu</td></tr>
       <tr><td>${svg("link")} ${kbd("Ctrl L")}</td><td>Copier le lien du document ouvert</td></tr>
       <tr><td>${svg("check")} ${kbd("Ctrl S")}</td><td>Enregistrer maintenant</td></tr>
+      <tr><td>${svg("comment")} ${kbd("Ctrl Alt M")}</td><td>Commenter le passage sélectionné</td></tr>
       <tr><td>${svg("pencil")} ${kbd("Ctrl Z")} / ${kbd("Ctrl Shift Z")}</td><td>Annuler / rétablir</td></tr>
       <tr><td>${svg("highlight")} ${kbd("H")}</td><td>Qui a écrit quoi (couleurs)</td></tr>
       <tr><td>${svg("history")} ${kbd("T")}</td><td>Historique / restaurer une version</td></tr>
@@ -1437,7 +1380,8 @@ function renderPreview() {
     const target = resolveRel(img.getAttribute("src"), S.path);
     if (target) img.src = rawUrl(target);
   }
-  injectPreviewComments();
+  markPreview();
+  if (currentView() !== "edit") layoutRail();
 }
 $("#preview").addEventListener("click", (e) => {
   const a = e.target.closest("a[href]");
@@ -1453,7 +1397,7 @@ function setView(v) {
   localStorage.setItem("ed-view", v);
   for (const b of $$("#viewSwitch button")) b.classList.toggle("on", b.dataset.view === v);
   renderPreview();
-  if (S && S.loaded) autosize();
+  if (S && S.loaded) { autosize(); renderRail(); }
   renderOverlay();
 }
 for (const b of $$("#viewSwitch button")) b.onclick = () => setView(b.dataset.view);
@@ -1507,174 +1451,610 @@ function updateButtons() {
   $("#btnCopyLink").hidden = !p;
   $("#btnComments").hidden = !(p && S && S.kind === "markdown");
   if ($("#btnComments").hidden) closeComments();
-  if (commentsPath && commentsPath !== p) loadComments();
   $("#viewSwitch").style.visibility = S && S.kind === "markdown" ? "visible" : "hidden";
 }
 
 /* ============================================================================================
- * Commentaires (façon Google Docs) — panneau latéral à droite
+ * Commentaires (façon Google Docs) : des fils ancrés sur un passage, en cartes dans la marge
+ *  - le passage suit les modifications de tout le monde (plage décalée à chaque changement) ;
+ *  - marge à droite du texte (éditeur ou aperçu) quand la place le permet, sinon panneau ;
+ *  - bouton « + » à côté de la sélection (ou Ctrl+Alt+M), réponses, modification, résolution ;
+ *  - mise à jour en direct : le serveur signale chaque changement dans le document partagé.
  * ========================================================================================== */
-let commentsPath = null;   // document actuellement affiché dans le panneau
-let commentsList = [];     // commentaires du document
-function commentPanel() { return $("#commentsPanel"); }
+let commentsPath = null;        // document dont les commentaires sont chargés
+let commentsList = [];          // fils du serveur ; _s/_e : plage dans le texte local (null : non ancré)
+let activeCid = null;           // fil sélectionné
+let draft = null;               // nouveau commentaire : { s, e, quote, text, top }
+let cEditing = null;            // modification en cours : { id, replyId, text }
+const replyDrafts = new Map();  // fil → réponse en cours de saisie
+let panelTab = "open";          // panneau : « open » ou « resolved »
+let commentsSeq = 0;
+let previewSel = null;          // sélection dans l'aperçu : { text, top, ratio }
+const RAIL_MIN_PANE = 760;      // largeur minimale du panneau de texte pour afficher la marge
+const C_CTX = 40;
+
+const rail = document.createElement("div");
+rail.className = "c-rail";
+const addBtn = document.createElement("button");
+addBtn.type = "button";
+addBtn.className = "c-add";
+addBtn.title = "Ajouter un commentaire (Ctrl+Alt+M)";
+addBtn.innerHTML = `${svg("comment")}<b>+</b>`;
+addBtn.hidden = true;
+
+const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+const linkify = (html) => html.replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)»"']/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight + 2, 240) + "px"; }
+const docText = () => (S ? (S.offline ? ta.value : S.ytext.toString()) : "");
+
+/* ---- Ancrage (mêmes règles que src/comments.js côté serveur) ---- */
+function cTail(a, b) { let n = 0; while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++; return n; }
+function cHead(a, b) { let n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; }
+function locateQuote(text, c) {
+  const q = c.quote || "";
+  if (!q) return null;
+  if (Number.isInteger(c.start) && text.slice(c.start, c.start + q.length) === q) return [c.start, c.start + q.length];
+  let best = null, bestScore = -1, bestDist = Infinity;
+  for (let i = text.indexOf(q), n = 0; i >= 0 && n < 500; i = text.indexOf(q, i + 1), n++) {
+    const score = cTail(text.slice(Math.max(0, i - C_CTX), i), c.prefix || "") + cHead(text.slice(i + q.length, i + q.length + C_CTX), c.suffix || "");
+    const dist = Math.abs(i - (c.start || 0));
+    if (score > bestScore || (score === bestScore && dist < bestDist)) { best = i; bestScore = score; bestDist = dist; }
+  }
+  return best == null ? null : [best, best + q.length];
+}
+/** Position après un delta Yjs ; `before` : une insertion exactement à cette position passe avant. */
+function shiftAt(pos, delta, before) {
+  let idx = 0;
+  for (const op of delta) {
+    if (op.retain) idx += op.retain;
+    else if (op.insert !== undefined) {
+      const len = typeof op.insert === "string" ? op.insert.length : 1;
+      if (idx < pos || (before && idx === pos)) pos += len;
+      idx += len;
+    } else if (op.delete && idx < pos) pos -= Math.min(op.delete, pos - idx);
+  }
+  return pos;
+}
+function anchorComment(c, text) {
+  c._s = c._e = null;
+  if (c.orphan || c.resolved) return;
+  let at = locateQuote(text, c);
+  // pas retrouvé tel quel : la plage tenue à jour par le serveur, si elle tombe dans le texte
+  if (!at && c.end > c.start && c.end <= text.length) at = [c.start, c.end];
+  if (at) { c._s = at[0]; c._e = at[1]; }
+}
+/** Le texte a changé : chaque passage commenté (et le brouillon) suit. */
+function shiftComments(delta) {
+  let lost = false;
+  for (const c of commentsList) {
+    if (c._s == null) continue;
+    c._s = shiftAt(c._s, delta, true);
+    c._e = shiftAt(c._e, delta, false);
+    if (c._e <= c._s) { c._s = c._e = null; lost = true; } // passage supprimé
+  }
+  if (draft) {
+    draft.s = shiftAt(draft.s, delta, true);
+    draft.e = shiftAt(draft.e, delta, false);
+    if (draft.e <= draft.s) { draft = null; lost = true; toast("Le passage que tu commentais a été supprimé."); }
+  }
+  if (lost) renderRail();
+}
+const openThreads = () => commentsList.filter((c) => !c.resolved && c._s != null).sort((a, b) => a._s - b._s);
+
+/* ---- Surlignage dans l'éditeur (dessiné par drawOverlay) ---- */
+function commentAnchors(len) {
+  if (!S || S.kind !== "markdown") return [];
+  const out = [];
+  for (const c of commentsList) {
+    if (c._s != null && !c.resolved && c._e <= len) out.push({ s: c._s, e: c._e, id: c.id, color: c.color || "#888", on: c.id === activeCid });
+  }
+  if (draft && draft.e <= len) out.push({ s: draft.s, e: draft.e, id: "draft", color: me.color, on: true });
+  return out;
+}
+/** Début de ma sélection (pour placer le bouton « + »), ou null. */
+function commentSelMark(len) {
+  if (!S || S.kind !== "markdown" || draft || ta.readOnly || document.activeElement !== ta) return null;
+  const a = ta.selectionStart, b = ta.selectionEnd;
+  if (b <= a || !ta.value.slice(a, b).trim()) return null;
+  return Math.min(a, len);
+}
+function afterOverlay() { layoutRail(); placeAddButton(); }
+
+/* ---- Marge des commentaires ---- */
+function panelOpen() { return !$("#commentsPanel").hidden; }
+function railHost() {
+  if (!S || !S.loaded || S.kind !== "markdown" || S.offline || panelOpen()) return null;
+  const v = currentView();
+  const host = v === "edit" ? paneEditor : v === "preview" ? panePreview : null;
+  return host && host.clientWidth >= RAIL_MIN_PANE ? host : null;
+}
+function captureFocus(box) {
+  const el = document.activeElement;
+  if (!el || !box.contains(el) || !el.dataset.f) return null;
+  return { f: el.dataset.f, cid: el.closest(".c-card").dataset.cid, a: el.selectionStart, b: el.selectionEnd };
+}
+function restoreFocus(box, k) {
+  if (!k) return;
+  const el = box.querySelector(`.c-card[data-cid="${k.cid}"] [data-f="${k.f}"]`);
+  if (el) { el.focus(); try { el.setSelectionRange(k.a, k.b); } catch (_e) {} }
+}
+
+function itemHTML(c, it, isRoot, canW) {
+  const mine = !!me && it.author === `u:${me.username}`;
+  const editingThis = cEditing && cEditing.id === c.id && cEditing.replyId === (isRoot ? null : it.id);
+  const acts = [];
+  if (isRoot && canW) acts.push(`<button class="icon-btn sm" data-c="${c.resolved ? "reopen" : "resolve"}" title="${c.resolved ? "Rouvrir la discussion" : "Marquer comme résolu et masquer"}">${svg(c.resolved ? "refresh" : "check")}</button>`);
+  if (mine && canW && !editingThis) acts.push(`<button class="icon-btn sm" data-c="edit" title="Modifier">${svg("pencil")}</button>`);
+  if ((mine || isAdmin()) && canW) acts.push(`<button class="icon-btn sm" data-c="del" title="${isRoot ? "Supprimer la discussion" : "Supprimer cette réponse"}">${svg("trash")}</button>`);
+  const body = editingThis
+    ? `<div class="c-form"><textarea class="input c-in" data-f="edit" rows="2">${esc(cEditing.text)}</textarea>
+        <div class="c-btns"><button class="btn sm" data-c="cancel-edit">Annuler</button><button class="btn btn-primary sm" data-c="save-edit">Enregistrer</button></div></div>`
+    : `<div class="c-text">${linkify(esc(it.text))}</div>`;
+  const when = new Date(it.created).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" });
+  return `<div class="c-item" data-rid="${isRoot ? "" : esc(it.id)}">
+    <div class="c-head">${avatarHTML({ name: it.authorName || "?", color: it.color || "#888" })}
+      <div class="c-who"><b>${esc(it.authorName || "?")}</b><span title="${esc(when)}">${relTime(it.created)}${it.edited ? " · modifié" : ""}</span></div>
+      <div class="c-acts">${acts.join("")}</div></div>${body}</div>`;
+}
+function cardHTML(c, inPanel) {
+  const canW = canWrite(commentsPath);
+  const active = c.id === activeCid;
+  const reps = c.replies || [];
+  const showAll = active || inPanel;
+  let html = "";
+  if (inPanel) {
+    const lost = !c.resolved && c._s == null;
+    html += `<div class="c-quote">${lost ? '<span class="c-lost">Passage supprimé</span>' : ""}${esc(trunc(c.quote || "", 160))}</div>`;
+  }
+  html += itemHTML(c, c, true, canW);
+  if (showAll) html += reps.map((r) => itemHTML(c, r, false, canW)).join("");
+  else if (reps.length) html += `<div class="c-more">${reps.length} réponse${reps.length > 1 ? "s" : ""}</div>`;
+  if (c.resolved) html += `<div class="c-resolved">${svg("check")}Résolu${c.resolvedBy ? " par " + esc(c.resolvedBy) : ""}</div>`;
+  if (active && canW && !c.resolved && !cEditing) {
+    const t = replyDrafts.get(c.id) || "";
+    html += `<div class="c-reply"><textarea class="input c-in" data-f="reply" rows="1" placeholder="Répondre…">${esc(t)}</textarea>
+      <div class="c-btns"${t.trim() ? "" : " hidden"}><button class="btn sm" data-c="cancel-reply">Annuler</button><button class="btn btn-primary sm" data-c="reply">Répondre</button></div></div>`;
+  }
+  const cls = ["c-card", active ? "active" : "", c.resolved ? "resolved" : "", inPanel ? "in-panel" : ""].filter(Boolean).join(" ");
+  return `<div class="${cls}" data-cid="${esc(c.id)}" style="--cc:${esc(c.color || "#888")}">${html}</div>`;
+}
+function draftHTML(inPanel) {
+  return `<div class="c-card draft active${inPanel ? " in-panel" : ""}" data-cid="draft" style="--cc:${esc(me.color)}">
+    ${inPanel ? `<div class="c-quote">${esc(trunc(draft.quote, 160))}</div>` : ""}
+    <div class="c-head">${avatarHTML({ name: me.name, color: me.color })}<div class="c-who"><b>${esc(me.name)}</b></div></div>
+    <textarea class="input c-in" data-f="draft" rows="2" placeholder="Ajouter un commentaire…  (Entrée pour publier)">${esc(draft.text)}</textarea>
+    <div class="c-btns"><button class="btn sm" data-c="cancel-draft">Annuler</button><button class="btn btn-primary sm" data-c="submit-draft"${draft.text.trim() ? "" : " disabled"}>Commenter</button></div>
+  </div>`;
+}
+
+/** Reconstruit les cartes (marge et panneau) ; la position est calculée ensuite par layoutRail. */
+function renderRail() {
+  const host = railHost();
+  const want = !!host && (openThreads().length > 0 || !!draft);
+  const changed = area.classList.contains("has-rail") !== want;
+  area.classList.toggle("has-rail", want);
+  document.body.classList.toggle("rail-on", want); // le sommaire flottant s'efface devant les cartes
+  if (!want) rail.remove();
+  else {
+    if (rail.parentNode !== host) host.appendChild(rail);
+    const keep = captureFocus(rail);
+    rail.innerHTML = (draft ? draftHTML(false) : "") + openThreads().map((c) => cardHTML(c, false)).join("");
+    for (const t of $$("textarea", rail)) autoGrow(t);
+    restoreFocus(rail, keep);
+  }
+  renderCommentsPanel();
+  updateCommentsBadge();
+  if (changed && S && S.loaded) autosize();
+  if (currentView() !== "edit") markPreview();
+  renderOverlay(); // → afterOverlay → layoutRail
+}
+
+/** Hauteur de chaque passage commenté dans le panneau qui porte la marge. */
+function measureTops(host) {
+  const out = new Map();
+  if (host === paneEditor) {
+    const base = overlay.offsetTop;
+    for (const sp of $$(".ca[data-cids]", overlay)) {
+      for (const id of sp.dataset.cids.split(" ")) if (!out.has(id)) out.set(id, base + sp.offsetTop);
+    }
+  } else {
+    const hr = host.getBoundingClientRect();
+    for (const m of $$("mark.cmark", $("#preview"))) {
+      const t = m.getBoundingClientRect().top - hr.top + host.scrollTop;
+      for (const id of m.dataset.cids.split(" ")) if (!out.has(id)) out.set(id, t);
+    }
+    if (draft && !out.has("draft") && draft.top != null) out.set("draft", draft.top);
+  }
+  return out;
+}
+/** Place les cartes en face de leur passage, sans chevauchement ; la carte active est alignée exactement. */
+function layoutRail() {
+  const host = rail.parentNode;
+  if (!host || !area.classList.contains("has-rail")) return;
+  const content = host === paneEditor ? ta : $("#preview");
+  rail.style.left = content.offsetLeft + content.offsetWidth + 12 + "px";
+  const tops = measureTops(host);
+  const cards = $$(".c-card", rail).map((el) => ({ el, id: el.dataset.cid, want: tops.get(el.dataset.cid) }));
+  for (const x of cards) x.el.style.display = x.want == null ? "none" : "";
+  const placed = cards.filter((x) => x.want != null).sort((a, b) => a.want - b.want);
+  if (!placed.length) return;
+  for (const x of placed) x.h = x.el.offsetHeight;
+  const GAP = 8;
+  const k = Math.max(0, placed.findIndex((x) => x.id === (draft ? "draft" : activeCid)));
+  placed[k].top = placed[k].want;
+  for (let i = k + 1; i < placed.length; i++) placed[i].top = Math.max(placed[i].want, placed[i - 1].top + placed[i - 1].h + GAP);
+  for (let i = k - 1; i >= 0; i--) placed[i].top = Math.min(placed[i].want, placed[i + 1].top - placed[i].h - GAP);
+  if (placed[0].top < 8) { let t = 8; for (const x of placed) { x.top = Math.max(x.top, t); t = x.top + x.h + GAP; } }
+  for (const x of placed) x.el.style.top = Math.round(x.top) + "px";
+}
+
+/* ---- Bouton « + » à côté de la sélection ---- */
+function placeAddButton() {
+  if (currentView() !== "preview") {
+    const mark = $(".selmark", overlay);
+    if (!mark) { if (addBtn.parentNode === paneEditor) addBtn.hidden = true; return; }
+    if (addBtn.parentNode !== paneEditor) paneEditor.appendChild(addBtn);
+    addBtn.style.top = overlay.offsetTop + mark.offsetTop - 4 + "px";
+    addBtn.style.left = ta.offsetLeft + ta.offsetWidth - 42 + "px";
+    addBtn.hidden = false;
+  }
+}
+function onPreviewSelection() {
+  const pv = $("#preview");
+  const sel = getSelection();
+  const ok = S && S.loaded && S.kind === "markdown" && !ta.readOnly && !draft && currentView() !== "edit"
+    && sel.rangeCount && !sel.isCollapsed && pv.contains(sel.anchorNode) && pv.contains(sel.focusNode) && sel.toString().trim();
+  if (!ok) { previewSel = null; if (addBtn.parentNode === panePreview) addBtn.hidden = true; return; }
+  const range = sel.getRangeAt(0);
+  const pre = document.createRange();
+  pre.selectNodeContents(pv); pre.setEnd(range.startContainer, range.startOffset);
+  const hr = panePreview.getBoundingClientRect();
+  const r = range.getClientRects()[0] || range.getBoundingClientRect();
+  previewSel = { text: sel.toString(), top: r.top - hr.top + panePreview.scrollTop, ratio: pre.toString().length / Math.max(1, pv.textContent.length) };
+  if (addBtn.parentNode !== panePreview) panePreview.appendChild(addBtn);
+  addBtn.style.top = previewSel.top - 4 + "px";
+  addBtn.style.left = pv.offsetLeft + pv.offsetWidth - 42 + "px";
+  addBtn.hidden = false;
+}
+let pselRaf = 0;
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement === ta) renderOverlay(); // repère de sélection → bouton « + »
+  cancelAnimationFrame(pselRaf); pselRaf = requestAnimationFrame(onPreviewSelection);
+});
+addBtn.addEventListener("mousedown", (e) => e.preventDefault()); // garde la sélection
+addBtn.addEventListener("click", () => startDraft());
+
+/** Passage du texte source correspondant à une sélection faite dans l'aperçu (mise en forme ignorée). */
+function sourceFromPreview(sel) {
+  const src = docText();
+  const words = sel.text.trim().split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 400) return null;
+  const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const gap = "(?:\\]\\([^)]*\\)|<[^>]+>|\\d+[.)]|[\\s*_`~>#\\[\\]!|\\\\+-])+";
+  let re;
+  try { re = new RegExp(words.map(reEsc).join(gap), "g"); } catch (_e) { return null; }
+  let best = null, bestD = Infinity, m, n = 0;
+  while ((m = re.exec(src)) && n++ < 300) {
+    const d = Math.abs(m.index / Math.max(1, src.length) - sel.ratio);
+    if (d < bestD) { bestD = d; best = [m.index, m.index + m[0].length]; }
+  }
+  return best;
+}
+
+/* ---- Passages commentés dans l'aperçu ---- */
+function mdPlain(md) {
+  return md
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+(\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gm, "")
+    .replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1")
+    .replace(/\*\*|__|~~|`+/g, "")
+    .replace(/(^|[^\p{L}\p{N}])[*_](?=\S)|(?<=\S)[*_](?=[^\p{L}\p{N}]|$)/gu, "$1")
+    .replace(/<[^>]+>/g, "").replace(/\s*\|\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+function previewIndex(el) {
+  let norm = "", space = true;
+  const map = [];
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const t = n.data;
+    for (let i = 0; i < t.length; i++) {
+      const sp = /\s/.test(t[i]);
+      if (sp && space) continue;
+      norm += sp ? " " : t[i]; map.push([n, i]); space = sp;
+    }
+  }
+  return { norm, map };
+}
+function wrapInPreview(el, it) {
+  const plain = mdPlain(it.quote || "");
+  if (!plain) return;
+  const cands = [plain];
+  if (plain.length > 60) cands.push(plain.slice(0, 60).trim(), plain.slice(-60).trim());
+  const { norm, map } = previewIndex(el);
+  for (const q of cands) {
+    let best = -1, bestD = Infinity;
+    for (let i = norm.indexOf(q), n = 0; i >= 0 && n < 100; i = norm.indexOf(q, i + 1), n++) {
+      const d = Math.abs(i / Math.max(1, norm.length) - it.ratio);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) continue;
+    const segs = new Map();
+    for (let i = best; i < best + q.length; i++) {
+      const [node, off] = map[i];
+      const s = segs.get(node);
+      if (s) s[1] = off + 1; else segs.set(node, [off, off + 1]);
+    }
+    for (const [node, [a, b]] of segs) {
+      if (!node.data.slice(a, b).trim()) continue;
+      let t = node;
+      if (a > 0) t = t.splitText(a);
+      if (b - a < t.data.length) t.splitText(b - a);
+      const m = document.createElement("mark");
+      m.className = "cmark" + (it.on ? " on" : "");
+      m.dataset.cids = it.id;
+      m.style.setProperty("--ca", it.color);
+      t.replaceWith(m); m.appendChild(t);
+    }
+    return;
+  }
+}
+function markPreview() {
+  const el = $("#preview");
+  if (!el || !S || S.kind !== "markdown" || currentView() === "edit") return;
+  for (const m of $$("mark.cmark", el)) m.replaceWith(...m.childNodes);
+  el.normalize();
+  const len = Math.max(1, docText().length);
+  const items = openThreads().map((c) => ({ id: c.id, color: c.color || "#888", quote: c.quote, ratio: c._s / len, on: c.id === activeCid }));
+  if (draft) items.push({ id: "draft", color: me.color, quote: draft.quote, ratio: draft.s / len, on: true });
+  for (const it of items) wrapInPreview(el, it);
+}
+$("#preview").addEventListener("click", (e) => {
+  const m = e.target.closest("mark.cmark");
+  if (m && !e.target.closest("a")) {
+    const id = m.dataset.cids.split(" ")[0];
+    if (id !== "draft") { activateComment(id); if (!railHost()) openComments(); }
+  } else if (activeCid && getSelection().isCollapsed && !e.target.closest("a")) { activeCid = null; renderRail(); }
+});
+
+/* ---- Actions ---- */
+function startDraft() {
+  if (!S || !S.loaded || S.kind !== "markdown" || ta.readOnly || S.offline) return;
+  let s, e, top = null;
+  if (currentView() === "preview" || (previewSel && document.activeElement !== ta)) {
+    if (!previewSel) return toast("Sélectionne d'abord le passage à commenter.");
+    const r = sourceFromPreview(previewSel);
+    if (!r) return toast("Passage introuvable dans le document : sélectionne-le dans l'éditeur.", { error: true });
+    [s, e] = r; top = previewSel.top;
+  } else {
+    s = ta.selectionStart; e = ta.selectionEnd;
+    if (e <= s) { // pas de sélection : toute la ligne du curseur
+      const v = ta.value;
+      s = v.lastIndexOf("\n", s - 1) + 1;
+      e = v.indexOf("\n", s); if (e < 0) e = v.length;
+    }
+    const v = ta.value;
+    while (s < e && /\s/.test(v[s])) s++;
+    while (e > s && /\s/.test(v[e - 1])) e--;
+  }
+  if (e <= s) return toast("Sélectionne d'abord le passage à commenter.");
+  draft = { s, e, quote: docText().slice(s, e), text: "", top };
+  activeCid = null;
+  addBtn.hidden = true;
+  previewSel = null;
+  getSelection().removeAllRanges();
+  if (!railHost()) openComments(); else renderRail();
+  requestAnimationFrame(() => { const t = $('.c-card.draft textarea'); if (t) t.focus(); });
+}
+function cancelDraft() { draft = null; renderRail(); if (currentView() !== "preview") ta.focus(); }
+async function submitDraft() {
+  if (!draft || !draft.text.trim() || draft.busy) return;
+  const full = docText();
+  const { s, e } = draft;
+  draft.busy = true;
+  try {
+    const d = await api("POST", "/api/comments", {
+      path: S.path, text: draft.text, quote: full.slice(s, e), start: s, color: me.color,
+      prefix: full.slice(Math.max(0, s - C_CTX), s), suffix: full.slice(e, e + C_CTX),
+    });
+    draft = null;
+    activeCid = d.comment.id;
+    await loadComments();
+  } catch (err) { if (draft) draft.busy = false; toast(err.message, { error: true }); }
+}
+async function commentApi(method, url, body) {
+  try { await api(method, url, body); await loadComments(); return true; }
+  catch (e) { toast(e.message, { error: true }); return false; }
+}
+async function sendReply(id) {
+  const text = (replyDrafts.get(id) || "").trim();
+  if (!text) return;
+  replyDrafts.delete(id);
+  if (!(await commentApi("POST", "/api/comments/reply", { path: commentsPath, id, text, color: me.color }))) replyDrafts.set(id, text);
+}
+async function saveEdit() {
+  if (!cEditing || !cEditing.text.trim()) return;
+  const { id, replyId, text } = cEditing;
+  cEditing = null;
+  await commentApi("PATCH", "/api/comments", { path: commentsPath, id, replyId, text });
+}
+async function setResolved(id, resolved) {
+  if (resolved && activeCid === id) activeCid = null;
+  if (await commentApi("POST", "/api/comments/resolve", { path: commentsPath, id, resolved })) {
+    toast(resolved ? "Discussion résolue (visible dans le panneau Commentaires → Résolus)." : "Discussion rouverte.");
+  }
+}
+async function deleteCommentItem(id, replyId) {
+  if (!confirm(replyId ? "Supprimer cette réponse ?" : "Supprimer toute la discussion ?")) return;
+  if (!replyId && activeCid === id) activeCid = null;
+  await commentApi("DELETE", `/api/comments?path=${encodeURIComponent(commentsPath)}&id=${encodeURIComponent(id)}${replyId ? "&replyId=" + encodeURIComponent(replyId) : ""}`);
+}
+
+function activateComment(id, opts = {}) {
+  if (activeCid !== id) { activeCid = id; cEditing = null; renderRail(); }
+  if (opts.scroll) scrollToComment(id);
+  if (panelOpen()) requestAnimationFrame(() => { const el = $(`#commentsList .c-card[data-cid="${id}"]`); if (el) el.scrollIntoView({ block: "nearest" }); });
+}
+function scrollToComment(id) {
+  const c = commentsList.find((x) => x.id === id);
+  if (!c || c._s == null) return;
+  if (currentView() === "preview") {
+    requestAnimationFrame(() => { const m = $(`#preview mark.cmark[data-cids~="${id}"]`); if (m) m.scrollIntoView({ block: "center", behavior: "smooth" }); });
+    return;
+  }
+  // l'éditeur est redessiné à la prochaine image : on mesure après
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const sp = overlay.querySelector(`.ca[data-cids~="${id}"]`);
+    if (sp) paneEditor.scrollTo({ top: overlay.offsetTop + sp.offsetTop - paneEditor.clientHeight / 3, behavior: "smooth" });
+  }));
+}
+/** Curseur posé dans un passage commenté → son fil devient actif (comme Google Docs). */
+function caretActivation(fromClick) {
+  if (!S || !S.loaded || draft || document.activeElement !== ta || ta.selectionEnd !== ta.selectionStart) return;
+  const pos = ta.selectionStart;
+  let hit = null;
+  for (const c of openThreads()) if (c._s <= pos && pos <= c._e && (!hit || c._e - c._s < hit._e - hit._s)) hit = c;
+  const id = hit ? hit.id : null;
+  if (id !== activeCid) { activeCid = id; cEditing = null; renderRail(); }
+  if (hit && fromClick && !railHost()) { if (!panelOpen()) openComments(); activateComment(hit.id); }
+}
+ta.addEventListener("click", () => caretActivation(true));
+ta.addEventListener("keyup", (e) => { if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End" || e.key.startsWith("Page")) caretActivation(false); });
+
+/** Clics, saisie et touches dans les cartes (marge et panneau). */
+function bindCards(box) {
+  box.addEventListener("click", (e) => {
+    const card = e.target.closest(".c-card");
+    if (!card) return;
+    const id = card.dataset.cid;
+    const btn = e.target.closest("[data-c]");
+    if (!btn) {
+      if (id !== "draft" && !e.target.closest("textarea, a")) activateComment(id, { scroll: true });
+      return;
+    }
+    const item = btn.closest(".c-item");
+    const replyId = (item && item.dataset.rid) || null;
+    const c = commentsList.find((x) => x.id === id);
+    switch (btn.dataset.c) {
+      case "submit-draft": submitDraft(); break;
+      case "cancel-draft": cancelDraft(); break;
+      case "reply": sendReply(id); break;
+      case "cancel-reply": replyDrafts.delete(id); renderRail(); break;
+      case "resolve": setResolved(id, true); break;
+      case "reopen": setResolved(id, false); break;
+      case "del": deleteCommentItem(id, replyId); break;
+      case "edit": {
+        const it = replyId ? c.replies.find((r) => r.id === replyId) : c;
+        activeCid = id; cEditing = { id, replyId, text: it.text }; renderRail();
+        requestAnimationFrame(() => { const t = $(`.c-card[data-cid="${id}"] [data-f="edit"]`); if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); } });
+        break;
+      }
+      case "save-edit": saveEdit(); break;
+      case "cancel-edit": cEditing = null; renderRail(); break;
+    }
+  });
+  box.addEventListener("input", (e) => {
+    const f = e.target.dataset.f;
+    const card = e.target.closest(".c-card");
+    if (!f || !card) return;
+    if (f === "draft" && draft) { draft.text = e.target.value; $('[data-c="submit-draft"]', card).disabled = !draft.text.trim(); }
+    else if (f === "reply") { replyDrafts.set(card.dataset.cid, e.target.value); $(".c-reply .c-btns", card).hidden = !e.target.value.trim(); }
+    else if (f === "edit" && cEditing) cEditing.text = e.target.value;
+    autoGrow(e.target);
+    layoutRail();
+  });
+  box.addEventListener("keydown", (e) => {
+    const f = e.target.dataset && e.target.dataset.f;
+    if (!f) return;
+    const id = e.target.closest(".c-card").dataset.cid;
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      if (f === "draft") submitDraft(); else if (f === "reply") sendReply(id); else saveEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault(); e.stopPropagation();
+      if (f === "draft") cancelDraft();
+      else if (f === "reply") { replyDrafts.delete(id); renderRail(); }
+      else { cEditing = null; renderRail(); }
+    }
+  });
+}
+bindCards(rail);
+bindCards($("#commentsList"));
+
+/* ---- Chargement ---- */
+async function loadComments() {
+  const p = S && S.loaded && S.kind === "markdown" ? S.path : null;
+  const seq = ++commentsSeq;
+  if (!p) { commentsPath = null; commentsList = []; renderRail(); return; }
+  let list;
+  try { list = (await api("GET", "/api/comments?path=" + encodeURIComponent(p))).comments || []; }
+  catch (_e) { return; }
+  if (seq !== commentsSeq || !S || S.path !== p) return;
+  commentsPath = p;
+  const text = docText();
+  for (const c of list) anchorComment(c, text);
+  commentsList = list;
+  if (activeCid && !list.some((c) => c.id === activeCid && !c.resolved)) activeCid = null;
+  if (cEditing && !list.some((c) => c.id === cEditing.id)) cEditing = null;
+  for (const id of [...replyDrafts.keys()]) if (!list.some((c) => c.id === id)) replyDrafts.delete(id);
+  renderRail();
+}
+function resetComments() {
+  commentsSeq++;
+  commentsPath = null; commentsList = []; activeCid = null; draft = null; cEditing = null; previewSel = null;
+  replyDrafts.clear();
+  rail.remove(); addBtn.hidden = true;
+  area.classList.remove("has-rail");
+  document.body.classList.remove("rail-on");
+  updateCommentsBadge();
+}
+
+/* ---- Panneau « tous les commentaires » ---- */
+function renderCommentsPanel() {
+  const open = commentsList.filter((c) => !c.resolved), done = commentsList.filter((c) => c.resolved);
+  $("#ccOpenN").textContent = open.length || "";
+  $("#ccDoneN").textContent = done.length || "";
+  for (const b of $$("#commentsPanel [data-tab]")) b.classList.toggle("on", b.dataset.tab === panelTab);
+  if (!panelOpen()) return;
+  const wrap = $("#commentsList");
+  const keep = captureFocus(wrap);
+  // ouverts : dans l'ordre du texte, les passages supprimés à la fin ; résolus : les plus récents d'abord
+  const list = panelTab === "open"
+    ? open.sort((a, b) => (a._s == null) - (b._s == null) || (a._s || 0) - (b._s || 0) || a.created - b.created)
+    : done.sort((a, b) => (b.resolvedAt || 0) - (a.resolvedAt || 0));
+  let html = draft && panelTab === "open" && !railHost() ? draftHTML(true) : "";
+  html += list.map((c) => cardHTML(c, true)).join("");
+  if (!html) {
+    html = panelTab === "open"
+      ? `<p class="muted-sm">Aucun commentaire ouvert.${canWrite(currentPath()) ? ` Sélectionne un passage du texte puis clique sur le bouton <b>+</b> qui apparaît à droite (ou ${kbd("Ctrl Alt M")}).` : ""}</p>`
+      : `<p class="muted-sm">Aucune discussion résolue.</p>`;
+  }
+  wrap.innerHTML = html;
+  for (const t of $$("textarea", wrap)) autoGrow(t);
+  restoreFocus(wrap, keep);
+}
+function updateCommentsBadge() {
+  const n = commentsList.filter((c) => !c.resolved).length;
+  const b = $("#ccBadge");
+  b.textContent = n > 99 ? "99+" : String(n);
+  b.hidden = !n;
+}
 function openComments() {
   if (!S || !S.loaded) return;
-  loadComments();
   $("#commentsPanel").hidden = false;
-  $("#commentsPanel").classList.add("open");
   $("#btnComments").classList.add("on");
-  const ta = $("#commentInput");
-  if (ta && !document.activeElement.classList.contains("comment-input")) setTimeout(() => ta.focus(), 60);
+  if (draft) panelTab = "open";
+  renderRail();
 }
 function closeComments() {
-  const p = commentPanel();
-  if (!p) return;
-  p.hidden = true; p.classList.remove("open");
+  if ($("#commentsPanel").hidden) return;
+  $("#commentsPanel").hidden = true;
   $("#btnComments").classList.remove("on");
+  if (S && S.loaded) renderRail();
 }
-function toggleComments() { $("#commentsPanel").hidden ? openComments() : closeComments(); }
-async function loadComments() {
-  const p = currentPath();
-  if (!p) return;
-  commentsPath = p;
-  try {
-    const d = await api("GET", "/api/comments?path=" + encodeURIComponent(p));
-    commentsList = d.comments || [];
-  } catch (_e) { commentsList = []; }
-  renderComments();
-  refreshCommentAnchors();
-  renderOverlay(); // surlignage des passages commentés, visible dès l'ouverture
-}
-function lineOfCursor() {
-  const v = (ta.value || "").split("\n");
-  const sel = ta.selectionStart || 0;
-  let ln = 1, acc = 0;
-  for (let i = 0; i < v.length; i++) { if (sel <= acc + v[i].length) return ln; acc += v[i].length + 1; ln++; }
-  return ln;
-}
-async function addComment() {
-  const inp = $("#commentInput");
-  const text = (inp && inp.value || "").trim();
-  if (!text) return toast("Écris d'abord un commentaire.", { error: true });
-  const p = currentPath();
-  if (!p) return;
-  // si une sélection existe dans l'éditeur, le commentaire s'y rattache (start/end/snippet)
-  let start = null, end = null, snippet = "";
-  try {
-    const ss = ta.selectionStart, se = ta.selectionEnd;
-    if (ss != null && se != null && se > ss) {
-      start = ss; end = se;
-      snippet = ta.value.slice(ss, se).trim().slice(0, 200);
-    }
-  } catch (_e) {}
-  try {
-    await api("POST", "/api/comments", {
-      path: p, text, line: lineOfCursor(), color: me.color,
-      start: start == null ? 0 : start, end: end == null ? 0 : end, snippet,
-    });
-    if (inp) inp.value = "";
-    await loadComments();
-    toast(snippet ? "Commentaire lié au passage sélectionné." : "Commentaire ajouté.");
-  } catch (e) { toast(e.message, { error: true }); }
-}
-async function setCommentResolved(id, resolved) {
-  const p = currentPath(); if (!p) return;
-  try { await api("POST", "/api/comments/resolve", { path: p, id, resolved }); await loadComments(); }
-  catch (e) { toast(e.message, { error: true }); }
-}
-async function deleteComment(id) {
-  const p = currentPath(); if (!p) return;
-  try { await api("DELETE", "/api/comments?path=" + encodeURIComponent(p) + "&id=" + encodeURIComponent(id)); await loadComments(); }
-  catch (e) { toast(e.message, { error: true }); }
-}
-function commentToggleIcon(resolved) {
-  const inner = resolved
-    ? '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'
-    : '<path d="M20 6 9 17l-5-5"/>';
-  return `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
-}
-function renderComments() {
-  const panel = commentPanel(); if (!panel) return;
-  const p = currentPath();
-  const wrap = $("#commentsList", panel);
-  if (!wrap) return;
-  if (!p) { wrap.innerHTML = `<p class="muted-sm">Aucun document ouvert.</p>`; return; }
-  if (!commentsList.length) { wrap.innerHTML = `<p class="muted-sm">Aucun commentaire sur ce document. Sélectionne un passage et écris ton commentaire ci-dessous.</p>`; return; }
-  wrap.innerHTML = commentsList.map((c) => {
-    const mine = me && c.author === `u:${me.username}`;
-    const act = `<span class="cc-actions">
-        <button class="icon-btn sm" data-cact="res" data-id="${esc(c.id)}" title="${c.resolved ? "Rouvrir" : "Marquer comme résolu"}">${commentToggleIcon(c.resolved)}</button>
-        ${mine ? `<button class="icon-btn sm" data-cact="del" data-id="${esc(c.id)}" title="Supprimer">${svg("trash")}</button>` : ""}
-      </span>`;
-    return `<div class="comment ${c.resolved ? "resolved" : ""}" style="--cc:${esc(c.color || "#888")}">
-      <div class="cc-head">${avatarHTML({ name: c.authorName || c.author, color: c.color || "#888" })}<span class="cc-name">${esc(c.authorName || c.author)}</span>${c.line ? `<span class="cc-line">ligne ${c.line}</span>` : ""}<span class="cc-time">${relTime(c.created)}</span>${act}</div>
-      ${c.snippet ? `<div class="cc-snippet">« ${esc(c.snippet)} »</div>` : ""}
-      <div class="cc-body">${esc(c.text)}</div>${c.resolved ? `<div class="cc-resolved-tag">Résolu</div>` : ""}
-    </div>`;
-  }).join("");
-  for (const b of $$("[data-cact=res]", wrap)) b.onclick = () => { const c = commentsList.find((x) => x.id === b.dataset.id); setCommentResolved(b.dataset.id, !(c && c.resolved)); };
-  for (const b of $$("[data-cact=del]", wrap)) b.onclick = () => deleteComment(b.dataset.id);
-}
-
-/* ---- Ancrage des commentaires (texte souligné + cartes d'aperçu) ---- */
-function updateCommentMarkers() {
-  // Les marqueurs de marge ont été retirés : le commentaire est porté par le texte
-  // souligné dans l'éditeur et par la carte dans l'aperçu.
-}
-function escapeXml(s) { return esc(String(s)); }
-function focusCommentAt(line) {
-  openComments();
-  // met en avant le commentaire de cette ligne dans le panneau (le plus récent)
-  const cards = $$("#commentsList .comment");
-  for (const card of cards) {
-    const lineEl = card.querySelector(".cc-line");
-    if (lineEl && +lineEl.textContent.replace(/\D/g, "") === line) card.classList.add("hl");
-    else card.classList.remove("hl");
-  }
-  const hl = document.querySelector("#commentsList .comment.hl");
-  if (hl) hl.scrollIntoView({ block: "center" });
-}
-
-// insère des cartes de commentaires dans l'aperçu, sous le paragraphe concerné
-function injectPreviewComments() {
-  const el = $("#preview"); const p = currentPath();
-  if (!el || !p) return;
-  // retirer les cartes déjà injectées (elles portent la classe doc-comment)
-  for (const old of $$(".doc-comment", el)) old.remove();
-  if (!commentsList.length) return;
-  const blocks = Array.from(el.children);
-  const text = (ta?.value) || "";
-  const lineOfBlock = (blk) => {
-    // on retrouve la première ligne source correspondant à ce bloc (via le texte)
-    const firstTxt = blk.textContent.trim();
-    if (!firstTxt) return 0;
-    const at = text.indexOf(firstTxt.length > 30 ? firstTxt.slice(0, 30) : firstTxt);
-    if (at < 0) return 0;
-    return text.slice(0, at).split("\n").length;
-  };
-  const attached = new Set();
-  for (const c of commentsList) {
-    if (!c || !c.line || attached.has(c.id)) continue;
-    // on choisit le bloc dont la ligne source est >= c.line (le plus proche)
-    let best = null, bestLine = Infinity;
-    for (const b of blocks) { const bl = lineOfBlock(b); if (bl >= c.line && bl < bestLine) { best = b; bestLine = bl; } }
-    if (!best) continue;
-    attached.add(c.id);
-    const card = document.createElement("div");
-    card.className = "doc-comment" + (c.resolved ? " resolved" : "");
-    card.style.setProperty("--cc", c.color || "#0891b2");
-    card.innerHTML = `${svg("comment")}<div class="dc-body"><div class="dc-meta"><span class="dc-author">${esc(c.authorName || c.author)}</span><span>· ${relTime(c.created)}</span>${c.resolved ? '<span class="dc-resolved">Résolu</span>' : ""}</div>${c.snippet ? `<div class="dc-snippet">« ${esc(c.snippet)} »</div>` : ""}<div class="dc-text">${esc(c.text)}</div></div>`;
-    best.after(card);
-  }
-}
-function refreshCommentAnchors() {
-  updateCommentMarkers();
-  injectPreviewComments();
-}
-
+function toggleComments() { panelOpen() ? closeComments() : openComments(); }
 $("#btnComments").onclick = toggleComments;
 $("#btnCommentsClose").onclick = closeComments;
-$("#commentForm").onsubmit = (e) => { e.preventDefault(); addComment(); };
+for (const b of $$("#commentsPanel [data-tab]")) b.onclick = () => { panelTab = b.dataset.tab; renderCommentsPanel(); };
 
 /* ============================================================================================
  * Actions
@@ -2230,7 +2610,9 @@ window.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(true); }
   if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); $("#search").focus(); $("#search").select(); }
   if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); copyLink(); }
-  if (e.key === "?") { e.preventDefault(); showShortcuts(); }
+  if (mod && e.altKey && e.key.toLowerCase() === "m") { e.preventDefault(); startDraft(); }
+  const typing = e.target.closest && e.target.closest("input, textarea, select, [contenteditable]");
+  if (e.key === "?" && !typing) { e.preventDefault(); showShortcuts(); }
 });
 window.addEventListener("hashchange", () => {
   const p = pathFromHash();
