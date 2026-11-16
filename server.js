@@ -1743,12 +1743,16 @@ server.on("upgrade", (req, socket, head) => {
  * (sync step 1) sont toujours admises ; les modifications (sync step 2 / update) seulement avec
  * le droit d'écriture. Personne n'écrit dans le canal système.
  */
+// Une seule table par document, toujours relue au moment du message : une connexion ouverte
+// pendant qu'une autre se ferme ne doit jamais se retrouver avec sa propre table (elle pourrait
+// alors remplacer ou effacer la présence des autres).
 const awareOwners = new Map(); // document → (identifiant de présence → connexion)
+const ownersOf = (name) => { let m = awareOwners.get(name); if (!m) awareOwners.set(name, (m = new Map())); return m; };
 function guardIncoming(conn, name) {
   const on = conn.on.bind(conn);
-  if (!awareOwners.has(name)) awareOwners.set(name, new Map());
-  const owners = awareOwners.get(name);
   on("close", () => {
+    const owners = awareOwners.get(name);
+    if (!owners) return;
     wsguard.releaseAwareness(conn, owners);
     if (!owners.size) awareOwners.delete(name);
   });
@@ -1759,7 +1763,7 @@ function guardIncoming(conn, name) {
       if (u8.length < 2) return;
       const u = users.byId(conn.edUserId);
       if (u8[0] === 1) {                                           // présence : nom imposé par le compte
-        const out = wsguard.rewriteAwareness(u8, conn, owners, u);
+        const out = wsguard.rewriteAwareness(u8, conn, ownersOf(name), u);
         if (out) fn(out, isBinary);
         return;
       }

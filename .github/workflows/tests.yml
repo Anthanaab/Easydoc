@@ -52,7 +52,8 @@ jobs:
         shell: bash
         run: |
           [ -f test-output.txt ] || exit 0
-          grep -nE "✖|not ok|Error|expected|actual|message:|at .*\.js:[0-9]+" test-output.txt | head -60 > echecs.txt || true
+          # chaque échec avec les lignes qui suivent (format « spec » et format TAP : error, failureType, code…)
+          grep -nE -A14 "^\s*(✖|not ok)" test-output.txt | grep -vE "^\S*-\s*$" | head -90 > echecs.txt || true
           echo "::error title=Tests en échec (${{ matrix.os }}, Node ${{ matrix.node }})::$(sed -e 's/%/%25/g' echecs.txt | sed ':a;N;$!ba;s/\n/%0A/g')"
           { echo '### Tests en échec'; echo '```'; cat echecs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 

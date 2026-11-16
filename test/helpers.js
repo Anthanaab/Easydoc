@@ -115,7 +115,10 @@ async function startServer(env = {}, opts = {}) {
         child.kill();
         await new Promise((r) => child.once("exit", r));
       }
-      fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      // Windows : un fichier peut rester verrouillé un instant après l'arrêt (git, antivirus…) ;
+      // un dossier temporaire oublié n'est pas un échec du test
+      try { fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }); }
+      catch (e) { console.warn(`[test] dossier temporaire non supprimé (${e.code || e.message}) : ${dataDir}`); }
     },
   };
   if (opts.dataDir) { // comptes déjà présents
