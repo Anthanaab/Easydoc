@@ -43,6 +43,7 @@ const ICONS = {
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
+  move: '<path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M15 19l-3 3-3-3"/><path d="M19 9l3 3-3 3"/><path d="M2 12h20"/><path d="M12 2v20"/>',
   pencil: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
   columns: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>',
   eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
@@ -397,7 +398,16 @@ async function refreshTree() {
     files = d.files.map((f) => f.path).sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
     renderTree();
     const cur = currentPath();
-    if (cur && !fileInfo.has(cur) && (F || (S && S.loaded))) { toast("Ce fichier n'est plus disponible (supprimé ou accès retiré)."); showEmpty(); }
+    if (cur && !fileInfo.has(cur) && (F || (S && S.loaded))) {
+      // Peut-être renommé / déplacé : l'annonce du nouveau nom (canal du document) peut arriver juste
+      // après la nouvelle liste (canal système). On attend un instant avant de conclure.
+      const was = S || F;
+      setTimeout(() => {
+        if ((S || F) !== was || currentPath() !== cur || fileInfo.has(cur)) return;
+        if (S && S.meta.get("movedTo")) return; // le document suit son nouveau nom
+        toast("Ce fichier n'est plus disponible (supprimé ou accès retiré)."); showEmpty();
+      }, 1500);
+    }
     else if (F) { F.size = fileInfo.get(F.path).size; renderStatus(); updateButtons(); }
     else if (S && S.loaded && !S.offline) { ED.setReadOnly(!canWrite(S.path)); renderStatus(); updateButtons(); }
   } catch (e) { toast("Impossible de lire la liste des fichiers : " + e.message, { error: true }); }
@@ -523,6 +533,7 @@ $("#tree").addEventListener("keydown", (e) => {
       else go(parentRow());
       break;
     case "Enter": case " ": row.click(); break;
+    case "F2": openMoveDialog(row.dataset.path || row.dataset.dir); break;
     default: return;
   }
   e.preventDefault();
@@ -691,6 +702,14 @@ function openFile(path, opts = {}) {
       toast(by && by !== "Modification externe" ? `Document mis à jour depuis le dépôt par ${by}.` : "Document mis à jour depuis le dépôt (modification externe).");
     }
     if (keys.has("deleted")) { toast("Ce document a été supprimé."); refreshTree(); showEmpty(); return; }
+    if (keys.has("movedTo")) {
+      const to = s.meta.get("movedTo");
+      if (to && to !== s.path) {
+        toast(`Document déplacé : ${to}`);
+        refreshTree().then(() => { if (S === s) openFile(to, { force: true }); });
+        return;
+      }
+    }
     if (keys.has("commentsAt") && s.loaded) loadComments(); // commentaires ajoutés / modifiés par quelqu'un
     renderStatus();
   });
@@ -945,7 +964,7 @@ function convertFile(path) {
 let config = {};
 const currentFolder = () => (currentPath() ? dirName(currentPath()) : "");
 function cleanName(name) {
-  let n = name.normalize("NFC").replace(/[^\p{L}\p{N} _.()&+,'@[\]!~=-]/gu, "-").replace(/~(?=\d)/g, "-")
+  let n = name.normalize("NFC").replace(/[^\p{L}\p{N} _.()&+,'’@[\]!~=-]/gu, "-").replace(/~(?=\d)/g, "-")
     .replace(/-{2,}/g, "-").replace(/^[.\s-]+/, "").replace(/[.\s]+$/, "").trim();
   if (!n) n = "fichier";
   return n.slice(0, 120);
@@ -1263,11 +1282,11 @@ $("#paneEditor").addEventListener("scroll", hideTip, { passive: true });
 
 /* ---- Historique des modifications ---- */
 function cleanTitle(t) {
-  const m = String(t || "").match(/^Easydoc\s*:\s*(création|import|suppression|conversion)?/i);
+  const m = String(t || "").match(/^Easydoc\s*:\s*(création|import|suppression|conversion|renommage|déplacement)?/i);
   if (!m) return t || "(sans titre)";
   const k = (m[1] || "").toLowerCase();
   return k === "création" ? "Création du document" : k === "import" ? "Import du fichier" : k === "suppression" ? "Suppression"
-    : k === "conversion" ? "Version modifiable créée" : "Modifications enregistrées";
+    : k === "conversion" ? "Version modifiable créée" : k === "renommage" ? "Renommé" : k === "déplacement" ? "Déplacé" : "Modifications enregistrées";
 }
 function patchHTML(patch) {
   const rows = [];
@@ -1516,6 +1535,7 @@ function showShortcuts() {
       <tr><td>${kbd("Ctrl Maj 7")} / ${kbd("8")} / ${kbd("9")}</td><td>Liste numérotée / à puces / à cocher</td></tr>
       <tr><td>${kbd("Ctrl")} + clic</td><td>Ouvrir un lien</td></tr>
       <tr><td>${kbd("Échap")} puis ${kbd("Tab")}</td><td>Sortir de l'éditeur au clavier</td></tr>
+      <tr><td>${kbd("F2")}</td><td>Renommer ou déplacer le document (ou la ligne choisie dans la liste)</td></tr>
       <tr><td>${kbd("↑")} ${kbd("↓")} ${kbd("←")} ${kbd("→")}</td><td>Parcourir la liste des documents (Entrée : ouvrir)</td></tr>
       <tr><td>${kbd("Tab")} / ${kbd("Shift Tab")}</td><td>Indenter / dé-indenter</td></tr>
       <tr><td>${kbd("?")}</td><td>Cette aide</td></tr>
@@ -1599,6 +1619,8 @@ function updateButtons() {
   $("#btnSave").style.display = F || (S && !writable) ? "none" : "";
   $("#btnDelete").disabled = !writable;
   $("#btnDelete").style.display = p && !writable ? "none" : "";
+  $("#btnMove").hidden = !(p && writable);
+  $("#crumbs").classList.toggle("renamable", !!(S && S.loaded && writable));
   $("#btnAccess").hidden = !(isAdmin() && p);
   $("#btnAuthors").hidden = !(S && S.loaded && !S.offline);
   $("#btnHistory").hidden = !p;
@@ -2603,6 +2625,76 @@ $("#btnNewEmpty").onclick = newDocument;
 $("#btnUpload").onclick = pickFiles;
 $("#btnUploadEmpty").onclick = pickFiles;
 $("#btnDelete").onclick = deleteDocument;
+/* ---- Renommer / déplacer un document ou un dossier ---- */
+const ROOT_LABEL = "(racine du dépôt)";
+/** Fenêtre « Renommer ou déplacer » pour un document (ou fichier) ou un dossier de la liste. */
+function openMoveDialog(target) {
+  const p = target || currentPath();
+  if (!p) return;
+  const isFolder = !files.includes(p) && files.some((f) => f.startsWith(p + "/"));
+  if (!isFolder && !canWrite(p)) return toast("Tu n'as pas le droit de modifier ce fichier.", { error: true });
+  const ext = isFolder ? "" : (fileName(p).match(/\.[^.]+$/) || [""])[0];
+  const name = isFolder ? fileName(p) : fileName(p).slice(0, fileName(p).length - ext.length);
+  const parent = dirName(p);
+  // dossiers possibles : tous, sauf le dossier déplacé lui-même et ce qu'il contient
+  const folders = allFolders().filter((f) => !isFolder || (f !== p && !f.startsWith(p + "/")));
+  const opt = (v, label) => `<option value="${esc(v)}"${v === parent ? " selected" : ""}>${esc(label)}</option>`;
+  openModal({
+    title: isFolder ? "Renommer ou déplacer le dossier" : "Renommer ou déplacer",
+    subtitle: `<strong>${esc(p)}</strong>${isFolder ? ` · ${files.filter((f) => f.startsWith(p + "/")).length} fichier(s)` : ""}`,
+    body: `<div class="msg"></div>
+      <label class="field"><span>Nom</span>
+        <span class="mv-name"><input class="input" id="mvName" value="${esc(name)}" autocomplete="off" spellcheck="false">${ext ? `<span class="mv-ext">${esc(ext)}</span>` : ""}</span></label>
+      <label class="field"><span>Dossier</span>
+        <select class="input" id="mvDir">${opt("", ROOT_LABEL)}${folders.map((f) => opt(f, f)).join("")}<option value="__new">Nouveau dossier…</option></select></label>
+      <label class="field" id="mvNewWrap" hidden><span>Nouveau dossier (ex. <code>projets/2026</code>)</span>
+        <input class="input" id="mvNew" autocomplete="off" spellcheck="false"></label>
+      <p class="muted-sm">${isFolder ? "Tous les fichiers du dossier le suivent." : "Les commentaires, les auteurs et les droits d'accès suivent le document."}
+        Les participants qui l'ont ouvert passent automatiquement au nouveau nom.</p>`,
+    foot: '<button class="btn" data-act="cancel">Annuler</button><button class="btn btn-primary" data-act="ok">Renommer / déplacer</button>',
+    onMount(card) {
+      const nameEl = $("#mvName", card), dirEl = $("#mvDir", card), newEl = $("#mvNew", card);
+      dirEl.onchange = () => { $("#mvNewWrap", card).hidden = dirEl.value !== "__new"; if (dirEl.value === "__new") newEl.focus(); };
+      $('[data-act="cancel"]', card).onclick = closeModal;
+      const go = async () => {
+        const n = cleanName(nameEl.value.trim());
+        if (!n) return setMsg(card, "Donne un nom.", "err");
+        const dir = dirEl.value === "__new" ? newEl.value.trim().replace(/^\/+|\/+$/g, "") : dirEl.value;
+        if (dirEl.value === "__new" && !dir) return setMsg(card, "Indique le nom du nouveau dossier.", "err");
+        const to = (dir ? dir + "/" : "") + n + ext;
+        const btn = $('[data-act="ok"]', card);
+        btn.disabled = true; btn.textContent = "Déplacement…";
+        try {
+          const d = await api("POST", "/api/move", { from: p, to });
+          closeModal();
+          if (!d.moved) return;
+          await refreshTree();
+          // document ou dossier affiché : on suit (les autres participants suivent aussi, prévenus par le serveur)
+          const cur = currentPath();
+          if (cur === p) openFile(d.path);
+          else if (cur && cur.startsWith(p + "/")) openFile(d.path + cur.slice(p.length));
+          if (isFolder && closed.has(p)) { closed.delete(p); closed.add(d.path); localStorage.setItem("ed-closed", JSON.stringify([...closed])); }
+          toast(`${isFolder ? "Dossier" : fileName(p) === fileName(d.path) ? "Déplacé" : "Renommé"} : ${d.path}`);
+        } catch (e) { setMsg(card, e.message, "err"); btn.disabled = false; btn.textContent = "Renommer / déplacer"; }
+      };
+      $('[data-act="ok"]', card).onclick = go;
+      for (const el of [nameEl, newEl]) el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+      setTimeout(() => { nameEl.focus(); nameEl.select(); }, 40);
+    },
+  });
+}
+$("#btnMove").onclick = () => openMoveDialog();
+// clic sur le titre du document (comme dans Google Docs)
+$("#crumbs").addEventListener("click", (e) => { if (e.target.closest(".cur") && S && canWrite(S.path)) openMoveDialog(); });
+// liste des documents : clic droit sur une ligne
+$("#tree").addEventListener("contextmenu", (e) => {
+  const row = e.target.closest && e.target.closest(".node");
+  if (!row) return;
+  e.preventDefault();
+  openMoveDialog(row.dataset.path || row.dataset.dir);
+});
+
+
 $("#btnSave").onclick = () => saveNow(true);
 $("#btnSync").onclick = syncNow;
 $("#btnSettings").onclick = () => openAdmin("users");
@@ -2617,7 +2709,7 @@ $("#btnMenu").onclick = () => $("#app").classList.toggle("nav-open");
 /* ---- Menu « ⋯ » : actions secondaires de la barre d'outils quand la place manque ---- */
 const MORE_LABELS = {
   btnCopyLink: "Copier le lien", btnToc: "Plan du document", btnAuthors: "Qui a écrit quoi",
-  btnHistory: "Historique", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
+  btnHistory: "Historique", btnMove: "Renommer / déplacer", btnAccess: "Droits d'accès", btnSync: "Récupérer les modifications", btnDelete: "Supprimer le document",
 };
 let moreMenu = null;
 function closeMoreMenu() {
@@ -2683,6 +2775,7 @@ window.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); $("#search").focus(); $("#search").select(); }
   if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); copyLink(); }
   if (mod && e.altKey && e.key.toLowerCase() === "m") { e.preventDefault(); startDraft(); }
+  if (e.key === "F2" && !e.defaultPrevented && !(e.target.closest && e.target.closest("#tree, .modal")) && currentPath() && canWrite(currentPath())) { e.preventDefault(); openMoveDialog(); }
   // Ctrl+F hors de l'éditeur : recherche dans le document ouvert (celle du navigateur ne voit que l'écran)
   if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f" && !e.defaultPrevented && S && S.loaded && !moreMenu
     && !(e.target.closest && e.target.closest("input, textarea, select, .modal"))) { e.preventDefault(); ED.openSearch(); }

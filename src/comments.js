@@ -171,6 +171,14 @@ class CommentStore {
 
   clearPath(p) { if (this.map[p]) { delete this.map[p]; this._save(); } }
 
+  /** Document renommé / déplacé : ses discussions le suivent. */
+  movePath(from, to) {
+    if (!this.map[from] || from === to) return;
+    this.map[to] = this.map[from];
+    delete this.map[from];
+    this._save();
+  }
+
   /** Document (re)chargé : chaque fil retrouve son passage dans le texte, ou est détaché. */
   anchorAll(p, text) {
     const list = this._list(p);

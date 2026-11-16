@@ -277,6 +277,7 @@ setInterval(enforceAccess, 5000).unref(); // prend aussi en compte les changemen
 function scheduleSave(name) {
   const s = st(name);
   clearTimeout(s.timer);
+  if (s.moving) return; // en cours de déplacement : enregistré sous le nouveau nom
   const now = Date.now();
   const delay = Math.max(0, Math.min(AUTOSAVE_MS, s.firstDirty + AUTOSAVE_MAX_MS - now));
   s.timer = setTimeout(() => { commitDoc(name).catch(() => {}); }, delay);
@@ -339,7 +340,7 @@ function commitDoc(name, extraAuthor, docArg) {
     clearTimeout(s.timer);
     // docArg : à la fermeture, y-websocket a déjà retiré le document de sa table
     const doc = docArg || yws.docs.get(name);
-    if (!doc) return { committed: false };
+    if (!doc || s.moving) return { committed: false };
     const meta = doc.getMap("meta");
     if (!meta.get("loaded")) return { committed: false };
     const ytext = doc.getText(TEXT);
@@ -575,7 +576,7 @@ async function pollExternal(force = false) {
     try {
       await serialize(name, async () => {
         const file = await repo.readFile(name);
-        if (!file || file.content === s.lastRemote) return; // rien de nouveau
+        if (s.moving || !file || file.content === s.lastRemote) return; // rien de nouveau (ou en cours de déplacement)
         await mergeExternal(name, doc, file.content);
         if (s.dirty) scheduleSave(name);
         changed++;
@@ -1287,6 +1288,99 @@ app.post("/api/create", async (req, res) => {
     await serialize(p, () => repo.writeFile(p, initial, `Easydoc : création de ${p} (${req.user.displayName})`));
     bump("treeVersion");
     res.json({ ok: true, path: p });
+  } catch (e) { bad(res, 500, e.message); }
+});
+
+// ---- Renommer / déplacer un document ou un dossier -----------------------------------------------
+// Un seul commit ; les documents ouverts sont enregistrés puis suivent (les participants basculent
+// sur le nouveau nom) ; commentaires, « qui a écrit quoi » et droits d'accès suivent aussi. Le dossier
+// « <document> - images » accompagne un document changé de dossier, pour que ses images s'affichent.
+app.post("/api/move", async (req, res) => {
+  const from = safeFilePath(String((req.body && req.body.from) || ""));
+  if (!from) return bad(res, 400, "Chemin invalide.");
+  const typed = paths.safeFilePath(String((req.body && req.body.to) || "").trim());
+  if (!typed) return bad(res, 400, "Nom invalide : lettres, chiffres, espaces, - et _ ; dossiers séparés par /.");
+  // le dossier de destination est ramené à son nom réel ; le nom final est gardé tel que saisi
+  // (on peut ainsi changer seulement les majuscules d'un nom)
+  const toDir = dirOf(typed);
+  let to = joinPath(toDir ? repo.canonical(toDir) : "", path.posix.basename(typed));
+  try {
+    const all = await repo.listFiles();
+    const isFile = all.some((f) => f.path === from);
+    const inside = all.filter((f) => f.path.startsWith(from + "/"));
+    if (!isFile && !inside.length) return bad(res, 404, "Document ou dossier introuvable.");
+    if (isFile) {
+      const ext = path.posix.extname(from);
+      if (!path.posix.extname(to)) to += ext; // extension gardée si on ne l'a pas retapée
+      if (isEditable(from) !== isEditable(to)) return bad(res, 400, `Garde l'extension « ${ext} » : elle détermine comment le fichier s'ouvre.`);
+    }
+    if (to === from) return res.json({ ok: true, path: to, moved: 0 });
+    if (!isFile && (to + "/").toLowerCase().startsWith(from.toLowerCase() + "/")) return bad(res, 400, "Un dossier ne peut pas être déplacé à l'intérieur de lui-même.");
+    const pairs = isFile ? [[from, to]] : inside.map((f) => [f.path, to + f.path.slice(from.length)]);
+    const folderMoves = [[from, to]];
+    if (isFile && isEditable(from) && dirOf(from) !== dirOf(to)) {
+      const stem = path.posix.basename(from).replace(/\.[^.]+$/, "");
+      const imgFrom = joinPath(dirOf(from), `${stem} - images`), imgTo = joinPath(dirOf(to), `${stem} - images`);
+      const imgs = all.filter((f) => f.path.startsWith(imgFrom + "/"));
+      if (imgs.length && !all.some((f) => f.path.startsWith(imgTo + "/"))) {
+        for (const f of imgs) pairs.push([f.path, imgTo + f.path.slice(imgFrom.length)]);
+        folderMoves.push([imgFrom, imgTo]);
+      }
+    }
+    for (const [a, b] of pairs) {
+      if (!paths.safeFilePath(b)) return bad(res, 400, `Nom invalide : ${b}`);
+      if (!access.can(req.user, a, "write") || !access.can(req.user, b, "write")) {
+        return bad(res, 403, `Tu n'as pas le droit de déplacer « ${a} » vers « ${b} ».`);
+      }
+    }
+    const moving = new Set(pairs.map(([a]) => a.toLowerCase()));
+    for (const [, b] of pairs) {
+      if (all.some((f) => f.path.toLowerCase() === b.toLowerCase()) && !moving.has(b.toLowerCase())) return bad(res, 409, `« ${b} » existe déjà.`);
+    }
+    if (pairs.some(([a]) => st(a).recovery)) return bad(res, 409, "Des modifications attendent encore d'être enregistrées : réessaie dans un instant.");
+
+    // 1. documents ouverts : enregistrés, puis plus d'enregistrement automatique sous l'ancien nom
+    const live = pairs.map(([a, b]) => ({ a, b, doc: isEditable(a) ? yws.docs.get(a) : null }))
+      .filter((x) => x.doc && x.doc.getMap("meta").get("loaded"));
+    for (const x of live) {
+      if (st(x.a).dirty) await commitDoc(x.a, req.user.displayName);
+      st(x.a).moving = true;
+      clearTimeout(st(x.a).timer);
+    }
+    // 2. déplacement dans le dépôt (un seul commit)
+    const verb = isFile && dirOf(from) === dirOf(to) ? "renommage" : "déplacement";
+    try { await repo.move(pairs, `Easydoc : ${verb} de ${from} en ${to} (${req.user.displayName})`); }
+    catch (e) { for (const x of live) st(x.a).moving = false; throw e; }
+    // 3. saisie arrivée pendant le déplacement : enregistrée sous le nouveau nom
+    const rk = repoKey();
+    for (const x of live) {
+      x.written = x.doc.getText(TEXT).toString();
+      if (x.written !== st(x.a).lastCommitted) await repo.writeFile(x.b, x.written, `Easydoc : ${x.b} (${req.user.displayName})`);
+    }
+    // 4. données rattachées au chemin
+    for (const [a, b] of pairs) {
+      comments.movePath(a, b);
+      const d = authorStore.load(rk, a);
+      if (d) { authorStore.save(rk, b, d.text, d.runs, d.v); authorStore.remove(rk, a); }
+      searchCache.delete(a);
+    }
+    for (const x of live) authorStore.save(rk, x.b, x.doc.getText(TEXT).toString(), authorship.runsFromYText(x.doc.getText(TEXT)), st(x.a).attrV || ATTR_V);
+    for (const [a, b] of folderMoves) access.movePath(a, b);
+    // 5. les participants basculent sur le nouveau nom
+    for (const x of live) {
+      x.doc.transact(() => x.doc.getMap("meta").set("movedTo", x.b), SERVER);
+      const d = x.doc, name = x.a, who = req.user.displayName;
+      setTimeout(async () => {
+        // frappe arrivée juste avant la bascule : enregistrée sous le nouveau nom (détectée et fusionnée
+        // comme une modification externe si quelqu'un l'a déjà rouvert)
+        const text = d.getText(TEXT).toString();
+        if (text !== x.written) { try { await repo.writeFile(x.b, text, `Easydoc : ${x.b} (${who})`); } catch (e) { console.error(`[déplacement] ${x.b} : ${e.message}`); } }
+        detachDoc(name, d);
+      }, 300);
+      states.delete(x.a);
+    }
+    bump("treeVersion");
+    res.json({ ok: true, path: to, moved: pairs.length });
   } catch (e) { bad(res, 500, e.message); }
 });
 

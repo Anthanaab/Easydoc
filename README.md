@@ -49,6 +49,10 @@ en train d'être tapé.
   plus étroit, le bouton *Plan* l'ouvre par-dessus le texte.
 - Liens entre documents (`Ctrl+clic`), thème clair ou sombre.
 - Dossiers, recherche (`Ctrl+K`), création et suppression de documents, adresse partageable par document.
+- **Renommer ou déplacer** un document ou un dossier : clic sur le titre du document, `F2`, clic droit
+  dans la liste ou menu « ⋯ ». Un seul commit ; commentaires, auteurs, droits d'accès et images du
+  document suivent, et les participants qui l'ont ouvert basculent sur le nouveau nom. L'historique
+  affiché repart du déplacement (les versions antérieures restent dans git sous l'ancien nom).
 - **Images dans le texte** : colle une capture d'écran (`Ctrl+V`) ou glisse une image sur le document :
   elle est enregistrée dans le dossier « *nom du document* - images » et s'affiche à cet endroit.
   Un autre fichier glissé sur le texte (PDF, tableur…) est importé à côté du document et un lien

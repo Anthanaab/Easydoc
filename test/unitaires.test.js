@@ -69,13 +69,46 @@ test("feuille de style : pas de sélecteur orphelin ni d'accolade manquante", ()
   assert.equal(depth, 0, "accolade ouvrante non refermée");
 });
 
+test("déplacement sur GitHub : un seul commit qui réutilise les contenus existants", async () => {
+  const { RepoService } = require("../src/repo");
+  const repo = new RepoService({ githubRepo: "moi/docs", githubBranch: "main", githubToken: "x" });
+  repo.mode = "github";
+  const calls = [];
+  const rec = (name, data) => async (args) => { calls.push([name, args]); return { data }; };
+  repo.octokit = { rest: { git: {
+    getRef: rec("getRef", { object: { sha: "c0" } }),
+    getCommit: rec("getCommit", { tree: { sha: "t0" } }),
+    getTree: rec("getTree", { tree: [
+      { path: "notes/a.md", type: "blob", mode: "100644", sha: "blobA" },
+      { path: "notes/b.png", type: "blob", mode: "100644", sha: "blobB" },
+    ] }),
+    createTree: rec("createTree", { sha: "t1" }),
+    createCommit: rec("createCommit", { sha: "c1" }),
+    updateRef: rec("updateRef", {}),
+  } } };
+  const r = await repo.move([["notes/a.md", "archives/a.md"], ["notes/b.png", "archives/b.png"]], "Easydoc : déplacement");
+  assert.equal(r.commit, "c1");
+  const tree = calls.find((c) => c[0] === "createTree")[1];
+  assert.equal(tree.base_tree, "t0");
+  assert.deepEqual(tree.tree, [
+    { path: "archives/a.md", mode: "100644", type: "blob", sha: "blobA" }, { path: "notes/a.md", mode: "100644", type: "blob", sha: null },
+    { path: "archives/b.png", mode: "100644", type: "blob", sha: "blobB" }, { path: "notes/b.png", mode: "100644", type: "blob", sha: null },
+  ]);
+  assert.deepEqual(calls.find((c) => c[0] === "createCommit")[1].parents, ["c0"]);
+  assert.deepEqual(calls.find((c) => c[0] === "updateRef")[1], { owner: "moi", repo: "docs", ref: "heads/main", sha: "c1" });
+  // destination déjà prise : rien n'est envoyé
+  calls.length = 0;
+  await assert.rejects(repo.move([["notes/a.md", "notes/b.png"]], "x"), /existe|porte déjà/);
+  assert.ok(!calls.some((c) => c[0] === "createCommit"));
+});
+
 test("chemins : noms dangereux refusés, noms ordinaires acceptés", () => {
   for (const bad of ["../x.md", "a/../../x.md", "C:/Windows/win.ini", ".git/config", "a/.env", "Interne./a.md", "Interne /a.md", "INTERN~1/a.md", "PROGRA~2.MD", "-A", "notes/-x.md", "a\0b.md"]) {
     assert.equal(safeFilePath(bad), null, bad);
   }
   // un chemin « absolu » reste à l'intérieur du dépôt
   assert.equal(safeFilePath("/etc/passwd"), "etc/passwd");
-  for (const ok of ["notes/a.md", "Notes de réunion/compte rendu (v2).md", "images/capture 2026-11-16 12h23m52.png", "Budget~2024.md", "rapport~v2.md"]) {
+  for (const ok of ["notes/a.md", "Notes de réunion/compte rendu (v2).md", "images/capture 2026-11-16 12h23m52.png", "Budget~2024.md", "rapport~v2.md", "Compte rendu de l’équipe.md"]) {
     assert.equal(safeFilePath(ok), ok);
   }
   assert.equal(safeDocPath("notes/image.png"), null);

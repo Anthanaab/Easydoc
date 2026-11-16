@@ -620,3 +620,10 @@ details.tlogs pre { margin: 8px 0 0; max-height: 220px; overflow: auto; padding:
 #editor .cm-searchMatch { background: color-mix(in srgb, #f59e0b 30%, transparent); border-radius: 2px; }
 #editor .cm-searchMatch-selected { background: color-mix(in srgb, #f59e0b 60%, transparent); }
 #editor .cm-selectionMatch { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ---- Renommer / déplacer ---- */
+.crumbs.renamable .cur { cursor: pointer; border-radius: 4px; padding: 1px 4px; margin: -1px -4px; }
+.crumbs.renamable .cur:hover { background: var(--bg-hover); }
+.mv-name { display: flex; align-items: center; gap: 6px; }
+.mv-name .input { flex: 1; }
+.mv-ext { color: var(--muted); font-size: 13px; }

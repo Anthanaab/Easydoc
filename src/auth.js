@@ -308,6 +308,22 @@ class AccessStore {
     }
     if (changed) this.save();
   }
+  /**
+   * Dossier ou fichier renommé / déplacé : ses règles (et celles de ce qu'il contient) le suivent.
+   * Sans cela, un dossier « Interne » masqué deviendrait visible une fois renommé.
+   */
+  movePath(from, to) {
+    let changed = false;
+    for (const p of Object.keys(this.rules)) {
+      if (p === from || p.startsWith(from + "/")) {
+        const np = to + p.slice(from.length);
+        this.rules[np] = this.rules[p];
+        delete this.rules[p];
+        changed = true;
+      }
+    }
+    if (changed) this.save();
+  }
   groups() {
     const out = new Set();
     for (const r of Object.values(this.rules)) for (const k of Object.keys(r)) if (k.startsWith("group:")) out.add(k.slice(6));

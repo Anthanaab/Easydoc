@@ -10,7 +10,7 @@
 const path = require("path");
 
 const MAX_LEN = 300;
-const SEGMENT = /^[\p{L}\p{N} _.()&+,'@[\]!~=-]+$/u;
+const SEGMENT = /^[\p{L}\p{N} _.()&+,'’@[\]!~=-]+$/u; // ’ : apostrophe typographique (français)
 const EDITABLE = /\.(md|markdown|txt)$/i;
 // nom court Windows (8.3) : « INTERN~1 », « PROGRA~2.MD » — mais pas « Budget~2024.md »
 const SHORT_NAME = /^(?=[^.]{1,8}(\.|$))[^~.]{1,6}~\d+(\.[^.]{0,3})?$/i; // partie avant le point : 8 caractères au plus

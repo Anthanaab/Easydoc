@@ -239,6 +239,48 @@ class RepoService {
   }
 
   /** Supprime un fichier. */
+  /**
+   * Renomme / déplace des fichiers en un seul commit : pairs = [[ancien, nouveau], …].
+   * Les contenus ne sont pas relus ni réécrits (GitHub : on réutilise les blobs existants).
+   */
+  async move(pairs, message) {
+    if (!pairs.length) return { moved: 0 };
+    if (this.mode === "github") {
+      const { owner, repo } = this._split();
+      const branch = this.options.githubBranch;
+      const { data: ref } = await this.octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+      const { data: head } = await this.octokit.rest.git.getCommit({ owner, repo, commit_sha: ref.object.sha });
+      const { data: tree } = await this.octokit.rest.git.getTree({ owner, repo, tree_sha: head.tree.sha, recursive: "1" });
+      const byPath = new Map(tree.tree.filter((t) => t.type === "blob").map((t) => [t.path, t]));
+      const entries = [];
+      for (const [from, to] of pairs) {
+        const t = byPath.get(from);
+        if (!t) throw new Error(`Fichier introuvable dans le dépôt : ${from}`);
+        if (byPath.has(to)) throw new Error(`Un fichier porte déjà ce nom : ${to}`);
+        entries.push({ path: to, mode: t.mode, type: "blob", sha: t.sha }, { path: from, mode: t.mode, type: "blob", sha: null });
+      }
+      const { data: newTree } = await this.octokit.rest.git.createTree({ owner, repo, base_tree: head.tree.sha, tree: entries });
+      const { data: commit } = await this.octokit.rest.git.createCommit({ owner, repo, message, tree: newTree.sha, parents: [ref.object.sha] });
+      // échoue (422) si la branche a bougé entre-temps : rien n'est perdu, il suffit de recommencer
+      await this.octokit.rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: commit.sha });
+      return { moved: pairs.length, commit: commit.sha };
+    }
+    const root = path.resolve(this.options.localRepoDir);
+    for (const [from, to] of pairs) {
+      const src = this._local(from), dst = this._local(to);
+      if (!fs.existsSync(src)) throw new Error(`Fichier introuvable : ${from}`);
+      if (fs.existsSync(dst) && src.toLowerCase() !== dst.toLowerCase()) throw new Error(`Un fichier porte déjà ce nom : ${to}`);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      try { await this.git.raw(["mv", "--", from, to]); } // garde la trace du renommage pour git
+      catch (_e) { fs.renameSync(src, dst); await this.git.raw(["add", "-A", "--", from, to]).catch(() => {}); }
+      // dossiers devenus vides
+      let dir = path.dirname(src);
+      while (dir !== root && dir.startsWith(root) && fs.existsSync(dir) && fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); dir = path.dirname(dir); }
+    }
+    try { await this.git.commit(message); } catch (e) { console.error("[git] déplacement :", e.message.split("\n")[0]); }
+    return { moved: pairs.length };
+  }
+
   async deleteFile(rel, message) {
     if (this.mode === "github") {
       const { owner, repo } = this._split();
